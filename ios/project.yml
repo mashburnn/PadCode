@@ -1,0 +1,80 @@
+name: PadCode
+options:
+  bundleIdPrefix: com.mashburnkansana
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+packages:
+  # 0.5.2 with a layout fix (vendor/Runestone/PADCODE.md). Also replaces the
+  # copy TreeSitterLanguages asks for.
+  Runestone:
+    path: ../vendor/Runestone
+  TreeSitterLanguages:
+    url: https://github.com/simonbs/TreeSitterLanguages
+    exactVersion: 0.1.10
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    exactVersion: 1.99.0
+targets:
+  PadCode:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - path: Generated/padcore.swift
+      - path: Assets.xcassets
+      # Flat into the bundle root (a top-level "Resources" dir breaks iOS bundles);
+      # themes/ stays a folder for Bundle.url(forResource:subdirectory:"themes").
+      - path: Resources
+        excludes: ["themes/**"]
+        buildPhase: resources
+      - path: Resources/themes
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - framework: Generated/PadCoreFFI.xcframework
+        embed: false
+      - package: Runestone
+      - package: SwiftTerm
+      - package: TreeSitterLanguages
+        products: [TreeSitterBashRunestone, TreeSitterCRunestone, TreeSitterCPPRunestone, TreeSitterCSSRunestone,
+                   TreeSitterCSharpRunestone, TreeSitterGoRunestone, TreeSitterHTMLRunestone, TreeSitterJSONRunestone,
+                   TreeSitterJavaRunestone, TreeSitterJavaScriptRunestone, TreeSitterLuaRunestone,
+                   TreeSitterMarkdownRunestone, TreeSitterPHPRunestone, TreeSitterPythonRunestone,
+                   TreeSitterRubyRunestone, TreeSitterRustRunestone, TreeSitterSQLRunestone, TreeSitterSwiftRunestone,
+                   TreeSitterTOMLRunestone, TreeSitterTSXRunestone, TreeSitterTypeScriptRunestone,
+                   TreeSitterYAMLRunestone]
+      - sdk: SystemConfiguration.framework
+      - sdk: Security.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mashburnkansana.padcode
+        PRODUCT_NAME: PadCode
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "2"
+        SWIFT_VERSION: "5.0"
+        SWIFT_STRICT_CONCURRENCY: minimal
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: T3Z3SP2L9U
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: PadCode
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        INFOPLIST_KEY_UIRequiresFullScreen: NO
+        INFOPLIST_KEY_UIStatusBarHidden: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        OTHER_LDFLAGS: "-lc++"
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        # The Rust core is built for arm64 only (Apple-silicon simulators and iPads).
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+      configs:
+        # Strip the symbol table (~75k entries, mostly Rust and tree-sitter). UIKit's
+        # keyboard code calls dladdr on every caret move, and dladdr scans it
+        # linearly, which was most of each keystroke's cost on the iPad. Crash logs
+        # still symbolicate from the dSYM.
+        Release:
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: all
+          COPY_PHASE_STRIP: YES

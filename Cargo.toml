@@ -1,0 +1,28 @@
+[workspace]
+members = ["core"]
+exclude = ["vendor"]
+resolver = "2"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+# ponytail: keeps target/ small (full debug info for 3 targets x vendored
+# OpenSSL hit ~9 GB). Line tables still give file:line in backtraces.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# Same patch as the VS Code CLI: upstream russh 0.37 negotiates curve25519 with
+# the dev-tunnels relay and panics on its 256-byte DH key ("copy_from_slice:
+# source slice length (256) does not match destination slice length (32)").
+[patch.crates-io]
+russh = { git = "https://github.com/microsoft/vscode-russh", rev = "0bced23016" }
+russh-cryptovec = { git = "https://github.com/microsoft/vscode-russh", rev = "0bced23016" }
+russh-keys = { git = "https://github.com/microsoft/vscode-russh", rev = "0bced23016" }
+
+# Microsoft's SDK with TCP_NODELAY on the relay socket (see vendor/dev-tunnels/PADCODE.md).
+[patch."https://github.com/microsoft/dev-tunnels"]
+tunnels = { path = "vendor/dev-tunnels" }

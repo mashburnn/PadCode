@@ -1,0 +1,34 @@
+[package]
+name = "padcore"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["lib", "staticlib"]
+name = "padcore"
+
+[dependencies]
+# Same rev the VS Code CLI pins; the crates.io `tunnels` is an unrelated upload.
+tunnels = { git = "https://github.com/microsoft/dev-tunnels", rev = "b73b0eb774b86a5b519c300f2f41c9072a66f663", default-features = false, features = ["connections", "vendored-openssl"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_bytes = "0.11"
+rmp-serde = "1.1"
+base64 = "0.22"
+thiserror = "2"
+log = "0.4"
+uniffi = { version = "0.32", features = ["tokio"] }
+
+[dev-dependencies]
+tokio = { version = "1.52", features = ["full"] }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]

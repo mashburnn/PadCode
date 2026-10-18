@@ -1,0 +1,5 @@
+target/
+ios/Generated/
+ios/PadCode.xcodeproj/
+.DS_Store
+build/
