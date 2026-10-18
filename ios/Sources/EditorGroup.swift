@@ -348,6 +348,13 @@ struct CodeEditor: UIViewRepresentable {
     func updateUIView(_ container: UIView, context: Context) {
         let c = context.coordinator
         guard let tv = c.tv else { return }
+        // SwiftUI can make the new container before it's done with the old one;
+        // whichever is on screen holds the editor.
+        if tv.superview !== container, container.window != nil || tv.window == nil {
+            tv.removeFromSuperview()
+            tv.frame = container.bounds
+            container.addSubview(tv)
+        }
         if c.themeName != wb.theme.name || c.fontSize != wb.fontSize || c.revision != file.revision {
             load(tv, context: context) // new theme, or text changed outside this editor
         }

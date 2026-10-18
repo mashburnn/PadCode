@@ -67,6 +67,8 @@ struct MachinesView: View {
             }
         }
         .preferredColorScheme(t.isDark ? .dark : .light)
+        // One-row look, like desktop VS Code. iPadOS still shows the menu bar
+        // (PadCode, File, Edit, Selection…) when the pointer reaches the top edge.
         .statusBarHidden()
         .persistentSystemOverlays(.hidden)
         .task {

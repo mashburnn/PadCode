@@ -80,7 +80,7 @@ struct WorkbenchView: View {
         .environmentObject(wb.editorStatus)
         .focusedSceneObject(wb) // the menu bar acts on this window
         .preferredColorScheme(t.isDark ? .dark : .light)
-        .statusBarHidden()
+        .statusBarHidden() // see App.swift
         .persistentSystemOverlays(.hidden)
         .task {
             if wb.desktop == nil { await wb.connect() }
