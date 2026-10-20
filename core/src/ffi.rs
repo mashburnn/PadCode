@@ -415,6 +415,15 @@ pub struct DocSymbol {
 }
 
 #[derive(uniffi::Record)]
+pub struct WorkspaceSymbol {
+    pub name: String,
+    pub kind: u8,
+    pub container: Option<String>,
+    pub path: String,
+    pub selection: LspRange,
+}
+
+#[derive(uniffi::Record)]
 pub struct Edit {
     pub range: LspRange,
     pub new_text: String,
@@ -525,6 +534,15 @@ impl LspServer {
         Ok(syms
             .into_iter()
             .map(|y| DocSymbol { name: y.name, detail: y.detail, kind: y.kind, depth: y.depth, selection: y.selection.into(), range: y.range.into() })
+            .collect())
+    }
+
+    pub async fn workspace_symbols(&self, query: String) -> R<Vec<WorkspaceSymbol>> {
+        let s = self.0.clone();
+        let syms = on_rt(async move { s.workspace_symbols(&query).await }).await?;
+        Ok(syms
+            .into_iter()
+            .map(|y| WorkspaceSymbol { name: y.name, kind: y.kind, container: y.container, path: y.location.path, selection: y.location.range.into() })
             .collect())
     }
 

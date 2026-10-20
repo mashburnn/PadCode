@@ -52,6 +52,25 @@ extension Workbench {
         }
     }
 
+    /// VS Code's "Run Selected Text in Active Terminal": the selection, or the
+    /// caret's line, typed into the terminal (a new one if there's none).
+    func runSelectionInTerminal() {
+        guard let tv = languages.activeView else { return }
+        let ns = tv.text as NSString
+        let range = tv.selectedRange.length > 0 ? tv.selectedRange : ns.lineRange(for: tv.selectedRange)
+        let text = ns.substring(with: range).trimmingCharacters(in: .newlines)
+        guard !text.isEmpty else { return }
+        // Shells take CR as Enter; a multi-line selection runs line by line.
+        let input = text.replacingOccurrences(of: "\r\n", with: "\r").replacingOccurrences(of: "\n", with: "\r") + "\r"
+        if let t = terminals.first(where: { $0.id == activeTerminal }), !t.exited {
+            panelOpen = true
+            panelTab = .terminal
+            t.send(input)
+        } else {
+            newTerminal(input: input, focus: false)
+        }
+    }
+
     func run(_ task: RunTask, cwd: String? = nil) {
         newTerminal(cwd: cwd ?? task.cwd ?? (root.isEmpty ? nil : root), input: task.command + "\r", title: task.label)
     }

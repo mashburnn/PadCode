@@ -148,6 +148,54 @@ struct SymbolPicker: View {
     }
 }
 
+/// Go to Symbol in Workspace.
+struct WorkspaceSymbolPicker: View {
+    @EnvironmentObject var wb: Workbench
+    @State private var query = ""
+    @State private var results: [WorkspaceSymbol] = []
+    @State private var searching = false
+
+    struct Item: Identifiable {
+        let id: Int
+        let symbol: WorkspaceSymbol
+    }
+
+    var body: some View {
+        QuickPickList(
+            placeholder: searching ? "Searching…" : query.isEmpty ? "Type to search symbols in the workspace"
+                : results.isEmpty ? "No matching symbols" : "Go to symbol in workspace",
+            query: $query,
+            items: results.prefix(200).enumerated().map { Item(id: $0.offset, symbol: $0.element) },
+            row: { item in
+                let s = item.symbol
+                let (icon, color) = symbolIcon(s.kind)
+                return AnyView(HStack(spacing: 6) {
+                    CodiconView(icon: icon, size: 14).foregroundStyle(wb.theme.ui(color, default: "#cccccc"))
+                    Text(s.name).font(.system(size: 13))
+                    if let c = s.container { Text(c).font(.system(size: 12)).foregroundStyle(wb.theme.descriptionFg).lineLimit(1) }
+                    Spacer()
+                    Text(wb.relative(s.path)).font(.system(size: 11)).foregroundStyle(wb.theme.descriptionFg).lineLimit(1).truncationMode(.head)
+                })
+            },
+            pick: { item in
+                wb.workspaceSymbolPicker = false
+                let s = item.symbol
+                Task { await wb.open(s.path, line: Int(s.selection.start.line) + 1, column: Int(s.selection.start.character)) }
+            },
+            dismiss: { wb.workspaceSymbolPicker = false })
+        .task(id: query) {
+            let q = query.trimmingCharacters(in: CharacterSet(charactersIn: "# "))
+            guard !q.isEmpty else { results = []; return }
+            guard (try? await Task.sleep(for: .milliseconds(150))) != nil else { return } // typing
+            searching = true
+            let found = await wb.languages.workspaceSymbols(q)
+            guard !Task.isCancelled else { return }
+            results = found
+            searching = false
+        }
+    }
+}
+
 /// Go to Line (⌃G): "42" or "42:7".
 struct GotoLinePicker: View {
     @EnvironmentObject var wb: Workbench

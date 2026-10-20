@@ -13,7 +13,7 @@ enum Codicon: String {
     case caseSensitive = "eab1", wholeWord = "eb7e", regex = "eb38", folder = "ea83", folderOpened = "eaf7"
     case file = "ea7b", layoutSidebarLeft = "ebf3", layoutPanel = "ebf2", save = "eb4b", kebab = "eb10"
     case splitHorizontal = "eb56", desktopDownload = "ea78", arrowRight = "ea9c"
-    case arrowUp = "eaa1", eye = "ea70", eyeClosed = "eae7", history = "ea82", home = "eb06", rootFolder = "eb46"
+    case arrowUp = "eaa1", arrowDown = "ea9a", eye = "ea70", eyeClosed = "eae7", history = "ea82", home = "eb06", rootFolder = "eb46"
     case play = "eb2c", tools = "eb6d", arrowLeft = "ea9b", globe = "eb01", references = "eb36", radioTower = "eb34"
     case emptyWindow = "eae4", multipleWindows = "eb23", listTree = "eb86", openPreview = "eb28"
     case cloudUpload = "eac3", cloudDownload = "eac2", replace = "eb3d", replaceAll = "eb3c", preserveCase = "eb2e", settings = "eb52"

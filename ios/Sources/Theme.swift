@@ -358,9 +358,11 @@ struct Hovering<Content: View>: View {
 extension View {
     /// A list row's hover background. Pass `.clear` for a selected row, so the
     /// selection color shows as is.
-    func hoverBackground(_ color: Color, cornerRadius: CGFloat = 0) -> some View {
+    func hoverBackground(_ color: Color, cornerRadius: CGFloat = 0, inset: CGFloat = 0) -> some View {
         Hovering { on in
-            background { if on { RoundedRectangle(cornerRadius: cornerRadius).fill(color) } }
+            background {
+                if on { RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).fill(color).padding(.horizontal, inset) }
+            }
         }
     }
 }
@@ -377,18 +379,133 @@ extension View {
     func tip(_ label: String) -> some View { accessibilityLabel(label).help(label) }
 }
 
-/// VS Code's toolbar icon button: a rounded highlight under the pointer
-/// (toolbar.hoverBackground), a little stronger while pressed.
+/// Icon buttons: a soft rounded highlight under the pointer; pressing dips the
+/// icon, and it springs back.
 struct ToolbarButtonStyle: ButtonStyle {
     var padding: CGFloat = 3
     func makeBody(configuration: Configuration) -> some View {
         Hovering { on in
             configuration.label
                 .padding(padding)
-                .background(Color(white: 0.5, opacity: configuration.isPressed ? 0.45 : on ? 0.3 : 0),
-                            in: RoundedRectangle(cornerRadius: 5))
+                .background(Color(white: 0.5, opacity: configuration.isPressed ? 0.32 : on ? 0.2 : 0),
+                            in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .scaleEffect(configuration.isPressed ? 0.88 : 1)
+                .animation(Motion.pop, value: configuration.isPressed)
+                .animation(.easeOut(duration: 0.12), value: on)
                 .contentShape(Rectangle())
                 .hoverEffectDisabled()
+        }
+    }
+}
+
+// MARK: - PadCode's own look
+// Not VS Code's: panels float as rounded cards on a darker canvas, popups are
+// glass, and things move on springs.
+
+extension UIColor {
+    func mixed(with other: UIColor, _ f: CGFloat) -> UIColor {
+        var (r1, g1, b1, a1, r2, g2, b2, a2): (CGFloat, CGFloat, CGFloat, CGFloat, CGFloat, CGFloat, CGFloat, CGFloat) = (0, 0, 0, 0, 0, 0, 0, 0)
+        getRed(&r1, green: &g1, blue: &b1, alpha: &a1)
+        other.getRed(&r2, green: &g2, blue: &b2, alpha: &a2)
+        return UIColor(red: r1 + (r2 - r1) * f, green: g1 + (g2 - g1) * f, blue: b1 + (b2 - b1) * f, alpha: a1 + (a2 - a1) * f)
+    }
+}
+
+extension VSTheme {
+    /// Behind the panels: the side bar's color, a shade darker.
+    var canvasBg: Color {
+        Color(uiColor("sideBar.background", ["editor.background"], default: isDark ? "#252526" : "#f3f3f3")
+            .mixed(with: .black, isDark ? 0.38 : 0.07).withAlphaComponent(1))
+    }
+    var cardBorder: Color { isDark ? .white.opacity(0.07) : .black.opacity(0.09) }
+    /// Selection pills and indicators.
+    var accent: Color { ui("focusBorder", "button.background", default: "#3794ff") }
+    /// A raised fill on a panel: the active tab, the selected segment.
+    var raised: Color { isDark ? .white.opacity(0.085) : .black.opacity(0.06) }
+    var hoverFill: Color { isDark ? .white.opacity(0.045) : .black.opacity(0.035) }
+}
+
+/// Springs, so every part of the app moves alike. Reduce Motion gets short fades.
+enum Motion {
+    private static var reduce: Bool { UIAccessibility.isReduceMotionEnabled }
+    /// Panels and tabs: quick, settles without overshoot.
+    static var layout: Animation { reduce ? .easeOut(duration: 0.12) : .spring(response: 0.34, dampingFraction: 0.86) }
+    /// Indicators and small controls: a touch of overshoot.
+    static var pop: Animation { reduce ? .easeOut(duration: 0.12) : .spring(response: 0.3, dampingFraction: 0.66) }
+    /// Popups and notifications arriving.
+    static var popup: Animation { reduce ? .easeOut(duration: 0.12) : .spring(response: 0.3, dampingFraction: 0.78) }
+}
+
+/// A card's corners in the canvas color, laid over its content (the rect
+/// minus the rounded rect). Covering instead of clipping keeps the editor and
+/// terminal, which are UIKit views, from rendering through a mask.
+struct CardCorners: Shape {
+    var radius: CGFloat
+    func path(in r: CGRect) -> Path {
+        var p = Path(r)
+        p.addRoundedRect(in: r, cornerSize: CGSize(width: radius, height: radius), style: .continuous)
+        return p
+    }
+}
+
+private struct PopIn: ViewModifier {
+    let active: Bool
+    let anchor: UnitPoint
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(active ? 0.92 : 1, anchor: anchor)
+            .offset(y: active ? (anchor.y < 0.5 ? -10 : 14) : 0)
+            .opacity(active ? 0 : 1)
+    }
+}
+
+extension AnyTransition {
+    /// Popups grow out of their edge and settle; the spring that inserts them sets the feel.
+    static func pop(from anchor: UnitPoint = .top) -> AnyTransition {
+        .modifier(active: PopIn(active: true, anchor: anchor), identity: PopIn(active: false, anchor: anchor))
+    }
+}
+
+private struct BounceIn: ViewModifier {
+    @State private var shown = false
+    func body(content: Content) -> some View {
+        content.scaleEffect(shown ? 1 : 0.4)
+            .animation(UIAccessibility.isReduceMotionEnabled ? nil : .spring(response: 0.35, dampingFraction: 0.5).delay(0.08), value: shown)
+            .onAppear { shown = true }
+    }
+}
+
+extension View {
+    /// Pops in with a bounce when it appears (a notification's icon).
+    func symbolBounceIn() -> some View { modifier(BounceIn()) }
+
+    /// Staggered entrance: the `index`th item rises into place once `shown`.
+    func rise(_ shown: Bool, _ index: Int) -> some View {
+        opacity(shown ? 1 : 0)
+            .offset(y: shown ? 0 : 12)
+            .animation(UIAccessibility.isReduceMotionEnabled ? .easeOut(duration: 0.15)
+                       : .spring(response: 0.5, dampingFraction: 0.82).delay(0.04 + Double(index) * 0.05), value: shown)
+    }
+
+    /// A floating panel on the canvas.
+    func card(_ t: VSTheme, fill: Color, radius: CGFloat = 12, highlighted: Bool = false) -> some View {
+        background(fill)
+            .overlay {
+                ZStack {
+                    CardCorners(radius: radius).fill(t.canvasBg, style: FillStyle(eoFill: true))
+                    RoundedRectangle(cornerRadius: radius, style: .continuous)
+                        .strokeBorder(highlighted ? t.accent.opacity(0.55) : t.cardBorder, lineWidth: 1)
+                }
+                .allowsHitTesting(false)
+            }
+    }
+
+    /// Popups' surface: Liquid Glass tinted with the theme (iPadOS 26), else blur and tint.
+    @ViewBuilder func glass(_ tint: Color, radius: CGFloat) -> some View {
+        if #available(iOS 26.0, *) {
+            glassEffect(.regular.tint(tint.opacity(0.75)), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+        } else {
+            floatingSurface(tint, cornerRadius: radius)
         }
     }
 }

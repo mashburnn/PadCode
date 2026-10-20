@@ -115,7 +115,11 @@ final class EditorStatus: ObservableObject {
 
 struct OpenFile: Identifiable, Equatable {
     private(set) var path: String
-    var name: String { path.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? path }
+    /// A Markdown preview is named after its source (its path carries a marker).
+    var name: String {
+        let p = MarkdownPreview.sourcePath(path)
+        return p.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? p
+    }
     var id: String { path }
     /// Bytes as loaded/last saved, for conflict detection.
     var original: Data
@@ -202,6 +206,7 @@ final class Workbench: ObservableObject {
     @Published var blobs: [String: Data] = [:]
     @Published var gotoLine = false
     @Published var symbolPicker = false
+    @Published var workspaceSymbolPicker = false
     @Published var taskPicker = false
     /// Desktop port -> iPad port it's served on (for previews).
     @Published var forwards: [UInt16: UInt16] = [:]
@@ -216,6 +221,13 @@ final class Workbench: ObservableObject {
     let settings = AppSettings.shared
     @Published var side: SideView? = .explorer
     @Published var panelOpen = true
+    /// The panel fills the editor's space (the editor steps aside).
+    @Published var panelMaximized = false
+    /// Zen mode: only the editor, centered.
+    @Published var zen = false
+    private var beforeZen: (side: SideView?, panel: Bool)?
+    /// The tab being dragged within this window, for reordering.
+    var draggingTab: String?
     @Published var quickOpen = false
     @Published var palette = false
     @Published var theme: VSTheme = .fallback
@@ -453,6 +465,35 @@ final class Workbench: ObservableObject {
         if groups.count == 1 { groups.append(EditorGroupState()) }
         focusedGroup = target
         await open(path)
+    }
+
+    /// Zen mode: everything but the editor slides away; leaving puts it back.
+    func toggleZen() {
+        withAnimation(Self.layoutAnimation) {
+            if zen, let b = beforeZen {
+                side = b.side
+                panelOpen = b.panel
+            } else {
+                beforeZen = (side, panelOpen)
+                side = nil
+                panelOpen = false
+            }
+            zen.toggle()
+        }
+    }
+
+    /// Drag a tab onto another: it takes that tab's place. From the other
+    /// group, it moves over (to the end).
+    /// ponytail: across groups it lands at the end, not at the drop spot.
+    func moveTab(_ path: String, onto target: String, in g: Int) {
+        guard groups.indices.contains(g), path != target, let j = groups[g].tabs.firstIndex(of: target) else { return }
+        if let i = groups[g].tabs.firstIndex(of: path) {
+            withAnimation(Self.layoutAnimation) {
+                groups[g].tabs.move(fromOffsets: IndexSet(integer: i), toOffset: j > i ? j + 1 : j)
+            }
+        } else if let from = groups.firstIndex(where: { $0.tabs.contains(path) }) {
+            withAnimation(Self.layoutAnimation) { moveToOtherGroup(path, from: from) }
+        }
     }
 
     func moveToOtherGroup(_ path: String, from g: Int) {
@@ -1198,7 +1239,7 @@ final class Workbench: ObservableObject {
     var terminalFocused: Bool { terminals.first { $0.id == activeTerminal }?.view.isFirstResponder ?? false }
 
     /// Showing and hiding parts of the window slides them, briefly.
-    static let layoutAnimation = Animation.snappy(duration: 0.22)
+    static var layoutAnimation: Animation { Motion.layout }
 
     /// ⌘B: the sidebar slides in and out.
     func toggleSidebar(_ view: SideView = .explorer) {
@@ -1233,10 +1274,7 @@ final class Workbench: ObservableObject {
         guard let v = terminals.first(where: { $0.id == activeTerminal })?.view else { return }
         if v.window != nil { _ = v.becomeFirstResponder(); return }
         // Just opened: its view joins the window on the next layout pass.
-        Task { @MainActor in
-            for _ in 0..<30 where v.window == nil { try? await Task.sleep(for: .milliseconds(16)) }
-            _ = v.becomeFirstResponder()
-        }
+        (v as? PadTerminalView)?.focusOnAttach = true
     }
 
     func focusEditor() { _ = languages.activeView?.becomeFirstResponder() }

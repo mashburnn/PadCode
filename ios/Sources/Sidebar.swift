@@ -7,6 +7,8 @@ struct ExplorerView: View {
     @State private var newItem: (parent: String, isDir: Bool)?
     @State private var newName = ""
     @State private var rootTargeted = false
+    /// Bumped by Collapse All: the tree is rebuilt with every folder closed.
+    @State private var collapses = 0
 
     var body: some View {
         let t = wb.theme
@@ -18,6 +20,7 @@ struct ExplorerView: View {
                     Button { newItem = (wb.root, false) } label: { CodiconView(icon: .newFile) }.tip("New File…")
                     Button { newItem = (wb.root, true) } label: { CodiconView(icon: .newFolder) }.tip("New Folder…")
                     Button { wb.explorerGeneration += 1 } label: { CodiconView(icon: .refresh) }.tip("Refresh Explorer")
+                    Button { collapses += 1 } label: { CodiconView(icon: .collapseAll) }.tip("Collapse Folders in Explorer")
                 }
                 Button { wb.picker = true } label: { CodiconView(icon: .folderOpened) }.tip("Open Folder…")
             }
@@ -39,7 +42,7 @@ struct ExplorerView: View {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             FolderChildren(path: wb.root, depth: 0, newItem: $newItem)
                         }
-                        .id(wb.root)
+                        .id("\(wb.root)#\(collapses)")
                         // Empty space below the tree also drops into the root folder.
                         Color.clear.frame(height: 120).contentShape(Rectangle())
                             .onDrop(of: [.item], isTargeted: nil) { handleDrop($0, into: wb.root, wb: wb) }
@@ -225,8 +228,15 @@ private struct TreeRow: View {
             .padding(.leading, CGFloat(depth) * 8 + 4)
             .frame(height: 22)
             .background(alignment: .leading) { IndentGuides(depth: depth, parent: parent) }
-            .background(targeted ? t.dropBg : selected ? t.listActiveBg : .clear)
-            .hoverBackground(selected || targeted ? .clear : t.listHoverBg)
+            .background {
+                // Rounded, inset from the card's edges.
+                if targeted || selected {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(targeted ? t.dropBg : t.accent.opacity(0.2))
+                        .padding(.horizontal, 6)
+                }
+            }
+            .hoverBackground(selected || targeted ? .clear : t.hoverFill, cornerRadius: 6, inset: 6)
             .contentShape(Rectangle())
             .onTapGesture {
                 if isDir { withAnimation(.snappy(duration: 0.18)) { expanded.toggle() } } else { Task { await wb.open(path) } }
@@ -535,13 +545,14 @@ struct SideHeader<Actions: View>: View {
     @ViewBuilder var actions: Actions
     @EnvironmentObject var wb: Workbench
     var body: some View {
-        HStack(spacing: 4) {
-            Text(title).font(.system(size: 11))
+        HStack(spacing: 2) {
+            // "EXPLORER" reads as "Explorer": a heading, not a label.
+            Text(title.capitalized).font(.system(size: 13, weight: .semibold))
             Spacer()
             actions.buttonStyle(ToolbarButtonStyle())
         }
         .foregroundStyle(wb.theme.sideBarTitleFg)
-        .padding(.leading, 20).padding(.trailing, 10)
-        .frame(height: 35)
+        .padding(.leading, 14).padding(.trailing, 8)
+        .frame(height: 40)
     }
 }

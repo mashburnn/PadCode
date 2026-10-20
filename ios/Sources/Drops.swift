@@ -12,9 +12,12 @@ func handleDrop(_ providers: [NSItemProvider], into dir: String, wb: Workbench) 
         for p in providers {
             // Our own Explorer rows are dragged as their path (plain text, no file name).
             if p.suggestedName == nil, p.canLoadObject(ofClass: String.self),
-               let s = await p.loadString(), !s.contains("\n"), wb.isWithin(s, wb.root) {
-                if s != wb.root { wb.requestMove(s, toDir: dir) }
-                continue
+               let s = await p.loadString(), !s.contains("\n") {
+                if s.hasPrefix(TabDrag.mark) { continue } // an editor tab, not a file
+                if wb.isWithin(s, wb.root) {
+                    if s != wb.root { wb.requestMove(s, toDir: dir) }
+                    continue
+                }
             }
             if let url = await p.copyDroppedFile() { files.append(url) }
         }

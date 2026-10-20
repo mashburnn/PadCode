@@ -16,6 +16,8 @@ final class TerminalSession: ObservableObject, Identifiable {
     @Published var unread = false
     /// Bumped on BEL, to flash the tab.
     @Published var bells = 0
+    /// ⌘F's find bar is showing (VS Code's terminal find widget).
+    @Published var finding = false
     let view: TerminalView
     private var term: Term?
     private var delegate: Delegate?
@@ -45,6 +47,8 @@ final class TerminalSession: ObservableObject, Identifiable {
         delegate = Delegate(owner: self)
         view.terminalDelegate = delegate
         view.optionAsMetaKey = true
+        view.linkHighlightMode = .hoverWithModifier // ⌘-hover underlines, ⌘-click opens (VS Code)
+        (view as? PadTerminalView)?.onFind = { [weak self] in self?.finding = true }
         keyBar = view.inputAccessoryView
         pointer = PointerSelection(view) { [weak self] in self?.size ?? (80, 24) }
     }
@@ -154,6 +158,39 @@ final class TerminalSession: ObservableObject, Identifiable {
 
     func kill() {
         try? term?.kill()
+    }
+
+    /// ⌘-click in the terminal, as in VS Code: `src/main.rs:12:5` opens in the
+    /// editor (relative to the folder the shell started in), web links in Safari.
+    /// ponytail: SwiftTerm only detects paths with a `/` (not a bare `point.c:6`),
+    /// and doesn't know the shell's current folder after `cd`.
+    func openLink(_ link: String) {
+        guard let (path, line, column) = Self.fileLink(link), let wb = workbench, let d = wb.desktop else {
+            if let url = URL(string: link), url.scheme != nil { UIApplication.shared.open(url) }
+            return
+        }
+        let full = path.hasPrefix("/") ? path
+            : path.hasPrefix("~/") ? d.join(base: wb.env?.home ?? "", name: String(path.dropFirst(2)))
+            : d.join(base: cwd ?? wb.root, name: path)
+        // A terminal window has no editor: the file opens in this desktop's editor window.
+        guard let target = wb.terminalsOnly == nil ? wb : wb.editorWindow else {
+            return wb.openInNewWindow(wb.root.isEmpty ? nil : wb.root) // ponytail: click again once it's open
+        }
+        let clean = full.contains("\\") ? full : (full as NSString).standardizingPath // not Windows paths
+        Task { await target.open(clean, line: line, column: column.map { max($0 - 1, 0) }) }
+    }
+
+    /// `src/main.rs:12:5` → ("src/main.rs", 12, 5); `file:///a/b.c` → ("/a/b.c", nil, nil);
+    /// a web link → nil.
+    nonisolated static func fileLink(_ link: String) -> (path: String, line: Int?, column: Int?)? {
+        var s = link.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("file://") {
+            s = URL(string: s)?.path ?? String(s.dropFirst(7))
+        } else if s.range(of: #"^[A-Za-z][\w+.-]+:(?!\d)"#, options: .regularExpression) != nil {
+            return nil // https:, mailto:, ssh: …
+        }
+        guard let m = s.firstMatch(of: #/^(.+?)(?::(\d+))?(?::(\d+))?:?$/#) else { return nil }
+        return (String(m.1), m.2.flatMap { Int($0) }, m.3.flatMap { Int($0) })
     }
 
     /// Lets go of the desktop shell without ending it (it moves to another window).
@@ -277,7 +314,7 @@ final class TerminalSession: ObservableObject, Identifiable {
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
         func scrolled(source: TerminalView, position: Double) {}
         func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
-            if let url = URL(string: link) { MainActor.assumeIsolated { UIApplication.shared.open(url) } }
+            MainActor.assumeIsolated { owner?.openLink(link) }
         }
         func bell(source: TerminalView) { MainActor.assumeIsolated { owner?.bells += 1 } }
         func clipboardCopy(source: TerminalView, content: Data) {
@@ -417,8 +454,17 @@ final class PadTerminalView: TerminalView {
     /// of finger travel keeps the text under the fingers.
     static let rowsPerReport: CGFloat = 3
 
+    /// Take the keyboard as soon as this view is in a window (the panel just opened).
+    var focusOnAttach = false
+
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        // Right as the panel's first frame is built, so UIKit's keyboard rebuild
+        // (~45 ms) delays the slide's start instead of stalling it halfway.
+        if window != nil, focusOnAttach {
+            focusOnAttach = false
+            _ = becomeFirstResponder()
+        }
         if scrollPan.view == nil { super.addGestureRecognizer(scrollPan) }
         if press.view == nil {
             // The keyboard comes here the moment a finger or button goes down,
@@ -455,6 +501,23 @@ final class PadTerminalView: TerminalView {
 
     /// A finger or button going down, as the test scenario drives it.
     func simulatePress() { press.onPress() }
+
+    var onFind: () -> Void = {}
+    override var keyCommands: [UIKeyCommand]? {
+        let find = UIKeyCommand(input: "f", modifierFlags: .command, action: #selector(findKey))
+        let clear = UIKeyCommand(input: "k", modifierFlags: .command, action: #selector(clearTerminal))
+        find.wantsPriorityOverSystemBehavior = true
+        clear.wantsPriorityOverSystemBehavior = true
+        return (super.keyCommands ?? []) + [find, clear]
+    }
+    @objc private func findKey() { onFind() }
+
+    /// ⌘K, as in VS Code: the scrollback goes and the shell redraws its prompt at the top.
+    /// ponytail: Ctrl-L goes to whatever's running; a busy program gets it instead of the shell.
+    @objc func clearTerminal() {
+        clearScrollback()
+        send(txt: "\u{0C}")
+    }
 
     @objc private func scrolled(_ g: UIPanGestureRecognizer) {
         let t = g.translation(in: self)
@@ -642,12 +705,18 @@ struct TerminalPanel: View {
         let problems = languages.counts.errors + languages.counts.warnings
         let window = wb.terminalsOnly != nil
         VStack(spacing: 0) {
-            if !window { Rectangle().fill(t.panelBorder).frame(height: 1) }
             HStack(spacing: 14) {
                 if !window {
-                    panelTab("PROBLEMS", .problems, badge: problems)
-                    panelTab("TERMINAL", .terminal, badge: 0)
-                    panelTab("PORTS", .ports, badge: wb.forwards.count)
+                    // A segmented pill; the selection slides between segments.
+                    HStack(spacing: 2) {
+                        panelTab("Problems", .problems, badge: problems)
+                        panelTab("Terminal", .terminal, badge: 0)
+                        panelTab("Ports", .ports, badge: wb.forwards.count)
+                    }
+                    .padding(2)
+                    .background(t.hoverFill, in: Capsule())
+                    .overlay(Capsule().strokeBorder(t.cardBorder))
+                    .animation(Motion.pop, value: wb.panelTab)
                     Spacer(minLength: 8)
                 }
                 if wb.panelTab == .terminal {
@@ -685,6 +754,13 @@ struct TerminalPanel: View {
                         } label: { CodiconView(icon: .trash) }.fixedSize().tip("Kill Terminal")
                     }
                     if wb.terminalsOnly == nil {
+                        // Snaps rather than animates: a terminal resized every frame reflows every frame.
+                        Button { wb.panelMaximized.toggle() } label: {
+                            Image(systemName: wb.panelMaximized ? "chevron.down" : "chevron.up").font(.system(size: 12, weight: .semibold))
+                                .contentTransition(.symbolEffect(.replace))
+                                .frame(width: 16, height: 16)
+                        }
+                        .fixedSize().tip(wb.panelMaximized ? "Restore Panel Size" : "Maximize Panel Size")
                         Button { wb.hidePanel() } label: { CodiconView(icon: .close) }.fixedSize().tip("Hide Panel")
                     }
                 }
@@ -692,10 +768,9 @@ struct TerminalPanel: View {
             }
             .buttonStyle(ToolbarButtonStyle())
             .foregroundStyle(t.panelTitleInactiveFg)
-            .padding(.horizontal, 12)
-            .background(window ? t.titleBarBg : .clear)
-            .overlay(alignment: .bottom) { if window { Rectangle().fill(t.titleBarBorder).frame(height: 1) } }
-            .frame(height: 35)
+            .padding(.horizontal, 10)
+            .background(window ? t.canvasBg : .clear)
+            .frame(height: 38)
 
             ZStack {
                 // Terminals stay alive (and keep their views) while Problems shows.
@@ -707,8 +782,14 @@ struct TerminalPanel: View {
                     let frozen = !shown && b.width > 100 && b.height > 40
                     TerminalHost(session: s)
                         .frame(width: frozen ? b.width + 8 : nil, height: frozen ? b.height + 4 : nil)
+                        // …but a kept size must never size the panel: one left wider (the
+                        // side bar since opened) widened the panel and pushed the window sideways.
+                        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .topLeading)
                         .opacity(shown ? 1 : 0)
                         .allowsHitTesting(shown)
+                }
+                if wb.panelTab == .terminal, let s = wb.terminals.first(where: { $0.id == wb.activeTerminal }) {
+                    TerminalFind(session: s)
                 }
                 if wb.panelTab == .problems {
                     ProblemsView().background(t.panelBg)
@@ -724,28 +805,101 @@ struct TerminalPanel: View {
     private func panelTab(_ title: String, _ tab: PanelTab, badge: Int) -> some View {
         let t = wb.theme
         let active = wb.panelTab == tab
-        return Button { withAnimation(.snappy(duration: 0.2)) { wb.panelTab = tab } } label: {
+        return Button { wb.panelTab = tab } label: {
             Hovering { on in
-                VStack(spacing: 3) {
-                    HStack(spacing: 4) {
-                        Text(title).font(.system(size: 11))
-                        if badge > 0 {
-                            Text("\(badge)").font(.system(size: 10)).padding(.horizontal, 5)
-                                .background(t.activityBadgeBg).foregroundStyle(.white).clipShape(Capsule())
-                        }
+                HStack(spacing: 5) {
+                    Text(title).font(.system(size: 12, weight: active ? .semibold : .medium))
+                    if badge > 0 {
+                        Text("\(badge)").font(.system(size: 10, weight: .semibold)).padding(.horizontal, 5).frame(minWidth: 16, minHeight: 15)
+                            .background(t.activityBadgeBg).foregroundStyle(.white).clipShape(Capsule())
+                            .contentTransition(.numericText())
+                            .transition(.scale.combined(with: .opacity))
                     }
-                    .foregroundStyle(active || on ? t.panelTitleActiveFg : t.panelTitleInactiveFg)
-                    ZStack {
-                        if active { Rectangle().fill(t.panelTitleActiveBorder).matchedGeometryEffect(id: "panel-underline", in: tabs) }
+                }
+                .foregroundStyle(active || on ? t.panelTitleActiveFg : t.panelTitleInactiveFg)
+                .padding(.horizontal, 11).frame(height: 24)
+                .background {
+                    if active {
+                        Capsule().fill(t.raised)
+                            .matchedGeometryEffect(id: "panel-segment", in: tabs)
                     }
-                    .frame(height: 1)
                 }
                 .fixedSize()
-                .contentShape(Rectangle())
+                .contentShape(Capsule())
+                .animation(Motion.pop, value: badge)
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressDown())
         .hoverEffectDisabled()
+    }
+}
+
+/// VS Code's terminal find widget: ↩ / ⇧↩ step through matches in the scrollback.
+private struct TerminalFind: View {
+    @ObservedObject var session: TerminalSession
+    @EnvironmentObject var wb: Workbench
+    @State private var query = ""
+    @State private var count = (index: 0, total: 0)
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        // The panel watches the workbench, not each shell: this view shows itself.
+        ZStack {
+            if session.finding {
+                bar.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .padding(.trailing, 14)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy(duration: 0.18), value: session.finding)
+    }
+
+    private var bar: some View {
+        let t = wb.theme
+        return HStack(spacing: 2) {
+            TextField("Find", text: $query)
+                .textFieldStyle(.plain).font(.system(size: 13))
+                .autocorrectionDisabled().textInputAutocapitalization(.never)
+                .focused($focused)
+                .onSubmit { step(forward: true); focused = true }
+                .onKeyPress(.return, phases: .down) { press in
+                    guard press.modifiers.contains(.shift) else { return .ignored }
+                    step(forward: false)
+                    return .handled
+                }
+                .onKeyPress(.escape) { close(); return .handled }
+                .padding(.horizontal, 6).frame(width: 180, height: 24)
+                .background(t.inputBg).overlay(RoundedRectangle(cornerRadius: 2).stroke(focused ? t.focusBorder : t.inputBorder))
+            Text(query.isEmpty ? "" : count.total == 0 ? "No results" : "\(count.index) of \(count.total)")
+                .font(.system(size: 12)).foregroundStyle(count.total == 0 && !query.isEmpty ? t.errorFg : t.descriptionFg)
+                .frame(minWidth: 70)
+            Button { step(forward: false) } label: { CodiconView(icon: .arrowUp) }.tip("Previous Match (⇧↩)")
+            Button { step(forward: true) } label: { CodiconView(icon: .arrowDown) }.tip("Next Match (↩)")
+            Button { close() } label: { CodiconView(icon: .close) }.tip("Close (Escape)")
+        }
+        .buttonStyle(ToolbarButtonStyle())
+        .padding(4)
+        .glass(t.ui("editorWidget.background", default: "#252526"), radius: 12)
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(t.widgetBorder))
+        .shadow(color: .black.opacity(0.3), radius: 6, y: 2)
+        .onAppear { focused = true }
+        .onChange(of: query) { _, q in
+            // Searching from the bottom as you type, like VS Code.
+            session.view.clearSearch()
+            if !q.isEmpty { step(forward: false) } else { count = (0, 0) }
+        }
+    }
+
+    private func step(forward: Bool) {
+        guard !query.isEmpty else { return }
+        if forward { session.view.findNext(query) } else { session.view.findPrevious(query) }
+        count = session.view.searchMatchSummary(query)
+    }
+
+    private func close() {
+        session.view.clearSearch()
+        session.finding = false
+        _ = session.view.becomeFirstResponder()
     }
 }
 
@@ -778,13 +932,13 @@ private struct TerminalTab: View {
             .padding(.leading, 6).padding(.trailing, 2).padding(.vertical, 2)
             .background {
                 if active {
-                    RoundedRectangle(cornerRadius: 5).fill(wb.theme.listActiveBg.opacity(0.6))
+                    RoundedRectangle(cornerRadius: 7, style: .continuous).fill(wb.theme.raised)
                         .matchedGeometryEffect(id: "terminal-tab", in: highlight)
                 } else if on {
-                    RoundedRectangle(cornerRadius: 5).fill(wb.theme.listHoverBg)
+                    RoundedRectangle(cornerRadius: 7, style: .continuous).fill(wb.theme.hoverFill)
                 }
             }
-            .overlay { RoundedRectangle(cornerRadius: 5).fill(wb.theme.focusBorder.opacity(flash ? 0.35 : 0)) }
+            .overlay { RoundedRectangle(cornerRadius: 7, style: .continuous).fill(wb.theme.accent.opacity(flash ? 0.35 : 0)) }
             .foregroundStyle(active || on ? wb.theme.panelTitleActiveFg : wb.theme.panelTitleInactiveFg)
             .contentShape(Rectangle())
             .onTapGesture { wb.focusTerminal(session.id) }

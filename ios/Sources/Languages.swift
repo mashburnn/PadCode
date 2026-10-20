@@ -380,6 +380,35 @@ final class Languages: ObservableObject {
         Task { await showHover(at: tv.selectedRange.location, anchor: anchor, in: tv, path: path, quiet: false) }
     }
 
+    /// Go to Symbol in Workspace: matching symbols from every running language server, best first.
+    /// ponytail: only languages whose server has started (a file of that language was opened).
+    func workspaceSymbols(_ query: String) async -> [WorkspaceSymbol] {
+        var all: [WorkspaceSymbol] = []
+        for s in servers.values where s.alive() {
+            all += (try? await s.workspaceSymbols(query: query)) ?? []
+        }
+        let q = query.lowercased()
+        // Exact name, then prefix, then the rest; shorter first within each.
+        func rank(_ s: WorkspaceSymbol) -> (Int, Int) {
+            let n = s.name.lowercased()
+            return (n == q ? 0 : n.hasPrefix(q) ? 1 : 2, n.count)
+        }
+        return all.sorted { rank($0) < rank($1) }
+    }
+
+    /// F8 / ⇧F8: caret to the next (previous) problem in this file, wrapping,
+    /// with its message shown. ponytail: this file only; VS Code moves on to the next file.
+    func goToProblem(forward: Bool) {
+        guard let tv = activeView, let path = activePath else { return }
+        let spots = (diagnostics[path] ?? []).filter { $0.severity <= 3 }.compactMap { nsRange($0.range, in: tv)?.location }.sorted()
+        let here = tv.selectedRange.location
+        guard let to = forward ? spots.first(where: { $0 > here }) ?? spots.first
+                               : spots.last(where: { $0 < here }) ?? spots.last else { return }
+        tv.selectedRange = NSRange(location: to, length: 0)
+        tv.scrollRangeToVisible(tv.selectedRange)
+        DispatchQueue.main.async { self.showHover() } // once it has scrolled there
+    }
+
     /// Hover info for the character at `location`. Quiet (pointer hover): shows
     /// nothing when there's nothing to say, as VS Code does.
     private func showHover(at location: Int, anchor: CGRect, in tv: TextView, path: String, quiet: Bool) async {
@@ -547,10 +576,11 @@ struct CompletionPopup: View {
                     .onChange(of: c.selected) { proxy.scrollTo(c.selected) }
                 }
                 .frame(width: 440, height: height)
+                // Solid, not glass: it redraws on every keystroke.
                 .background(t.ui("editorSuggestWidget.background", "editorWidget.background", default: "#252526"))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(t.ui("editorSuggestWidget.border", "editorWidget.border", default: "#454545")))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .shadow(color: t.widgetShadow, radius: 10, y: 4)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(t.widgetBorder))
+                .shadow(color: .black.opacity(t.isDark ? 0.35 : 0.12), radius: 14, y: 6)
                 .offset(x: x, y: y)
             }
         }
@@ -619,7 +649,8 @@ struct HoverPopup: View {
                 let origin = geo.frame(in: .global).origin
                 let width = min(560, geo.size.width - 16)
                 let x = min(max(h.anchor.minX - origin.x, 8), geo.size.width - width - 8)
-                let above = h.anchor.minY - origin.y > geo.size.height / 2
+                let (top, bottom) = (h.anchor.minY - origin.y, h.anchor.maxY - origin.y)
+                let above = top > geo.size.height / 2
                 ScrollView {
                     VStack(alignment: .leading, spacing: 6) {
                         let language = languages.activePath.flatMap { Language.treeSitter(for: wb.baseName($0)) }
@@ -636,16 +667,19 @@ struct HoverPopup: View {
                 .frame(maxHeight: 280)
                 .fixedSize(horizontal: false, vertical: true)
                 .foregroundStyle(t.ui("editorHoverWidget.foreground", "editor.foreground", default: "#cccccc"))
-                .background(t.ui("editorHoverWidget.background", "editorWidget.background", default: "#252526"))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(t.ui("editorHoverWidget.border", default: "#454545")))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .shadow(color: t.widgetShadow, radius: 10, y: 4)
-                .offset(x: x, y: above ? max(h.anchor.minY - origin.y - 290, 4) : h.anchor.maxY - origin.y + 4)
+                .glass(t.ui("editorHoverWidget.background", "editorWidget.background", default: "#252526"), radius: 12)
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(t.widgetBorder))
+                .shadow(color: .black.opacity(t.isDark ? 0.35 : 0.12), radius: 14, y: 6)
                 .onTapGesture { languages.hover = nil }
-                .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: above ? .bottom : .top)))
+                // Above the line, it sits right on it whatever its height (was 290 pt up).
+                .padding(.leading, x)
+                .frame(width: geo.size.width, height: max(above ? top - 4 : geo.size.height - bottom - 4, 0),
+                       alignment: above ? .bottomLeading : .topLeading)
+                .offset(y: above ? 0 : bottom + 4)
+                .transition(.pop(from: above ? .bottom : .top))
             }
         }
-        .animation(.easeOut(duration: 0.12), value: languages.hover == nil)
+        .animation(Motion.popup, value: languages.hover == nil)
     }
 
     /// A hover's code block in the editor's syntax colors (the file's language).
@@ -857,11 +891,21 @@ final class PadTextView: TextView {
             return
         }
         laidOutWidth = bounds.width
-        DispatchQueue.main.async { [weak self] in
-            self?.redisplayVisibleLines()
-            self?.onSized()
+        // While the width animates (the side bar sliding shut), retypeset at most
+        // every 120 ms instead of every frame; the first widening goes right away.
+        guard !redisplayScheduled else { return }
+        redisplayScheduled = true
+        let wait = max(0, lastRedisplay + 0.12 - CACurrentMediaTime())
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+            guard let self else { return }
+            redisplayScheduled = false
+            lastRedisplay = CACurrentMediaTime()
+            redisplayVisibleLines()
+            onSized()
         }
     }
+    private var redisplayScheduled = false
+    private var lastRedisplay: CFTimeInterval = 0
 
     override var keyCommands: [UIKeyCommand]? {
         var cmds = super.keyCommands ?? []
@@ -874,7 +918,8 @@ final class PadTextView: TextView {
         cmds.append(gotoLine)
         for (input, mods, name) in [(UIKeyCommand.f2, UIKeyModifierFlags(), "rename"), (UIKeyCommand.f12, .shift, "references"),
                                     (".", .command, "quickfix"), (" ", [.command, .shift], "signature"),
-                                    (UIKeyCommand.f5, .control, "run")] {
+                                    (UIKeyCommand.f5, .control, "run"),
+                                    (UIKeyCommand.f8, UIKeyModifierFlags(), "nextProblem"), (UIKeyCommand.f8, .shift, "prevProblem")] {
             let c = UIKeyCommand(input: input, modifierFlags: mods, action: #selector(namedKey(_:)))
             c.wantsPriorityOverSystemBehavior = true
             c.title = name

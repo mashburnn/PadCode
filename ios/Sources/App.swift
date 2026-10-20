@@ -60,12 +60,13 @@ struct MachinesView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var opened: WorkbenchTarget?
     @State private var sidebar = true
+    @State private var appeared = false
     private let theme = VSTheme.fallback
 
     var body: some View {
         let t = theme
         ZStack {
-            t.editorBg.ignoresSafeArea()
+            t.canvasBg.ignoresSafeArea()
             if let opened {
                 // Single-window case: this window becomes the workbench.
                 WorkbenchView(wb: Workbench(machine: opened.machine, folder: opened.folder))
@@ -101,64 +102,72 @@ struct MachinesView: View {
             TitleBar(theme: t, title: "PadCode — Remote Tunnels", onCommandCenter: { Task { await account.refresh() } }) {
                 EmptyView()
             } trailing: {
-                TitleBarButton(icon: .emptyWindow, label: "New Window") { openWindow(id: "machines") }
-                TitleBarButton(icon: .layoutSidebarLeft, label: "Toggle Side Bar", active: sidebar) { sidebar.toggle() }
-                TitleBarButton(icon: .refresh, label: "Refresh") { Task { await account.refresh() } }
+                TitleBarButton(symbol: "macwindow.badge.plus", label: "New Window") { openWindow(id: "machines") }
+                TitleBarButton(symbol: sidebar ? "rectangle.leadingthird.inset.filled" : "rectangle", label: "Toggle Side Bar", active: sidebar) {
+                    withAnimation(Motion.layout) { sidebar.toggle() }
+                }
+                TitleBarButton(symbol: "arrow.clockwise", label: "Refresh") { Task { await account.refresh() } }
             }
-            HStack(spacing: 0) {
+            HStack(spacing: WorkbenchView.gap) {
                 if sizeClass != .compact {
                     activityBar(t)
                     if sidebar {
-                        explorer(t).frame(width: 300).background(t.sideBarBg)
-                        Rectangle().fill(t.ui("sideBar.border", default: "#00000000")).frame(width: 1)
+                        explorer(t).frame(width: 300).card(t, fill: t.sideBarBg)
+                            .transition(.move(edge: .leading).combined(with: .opacity))
                     }
                 }
-                welcome(t).frame(maxWidth: .infinity, maxHeight: .infinity).background(t.editorBg)
+                welcome(t).frame(maxWidth: .infinity, maxHeight: .infinity).card(t, fill: t.editorBg)
             }
+            .padding(.trailing, WorkbenchView.gap)
             homeStatusBar(t)
         }
+        .onAppear { appeared = true }
     }
 
     // MARK: activity bar + REMOTE EXPLORER
 
     private func activityBar(_ t: VSTheme) -> some View {
-        VStack(spacing: 0) {
-            Button { sidebar.toggle() } label: {
+        VStack(spacing: 4) {
+            Button { withAnimation(Motion.layout) { sidebar.toggle() } } label: {
                 Hovering { on in
-                    CodiconView(icon: .remote, size: 24)
-                        .foregroundStyle(sidebar || on ? t.activityFg : t.activityInactiveFg)
-                        .frame(width: 48, height: 48)
-                        .overlay(alignment: .leading) {
-                            if sidebar { Rectangle().fill(t.activityBorderActive).frame(width: 2) }
-                        }
+                    Image(systemName: "point.3.connected.trianglepath.dotted").font(.system(size: 18, weight: sidebar ? .semibold : .regular))
+                        .foregroundStyle(sidebar ? t.accent : t.titleBarFg.opacity(on ? 0.95 : 0.55))
+                        .frame(width: 40, height: 40)
+                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(sidebar ? t.accent.opacity(0.16) : on ? t.hoverFill : .clear))
+                        .animation(Motion.pop, value: sidebar)
                 }
             }
+            .buttonStyle(PressDown(scale: 0.9))
             .hoverEffectDisabled()
+            .tip("Remote Explorer")
             Spacer()
             Menu {
                 Button("Refresh") { Task { await account.refresh() } }
                 Button("Sign Out", role: .destructive) { account.signOut() }
             } label: {
                 Hovering { on in
-                    CodiconView(icon: .account, size: 24).foregroundStyle(on ? t.activityFg : t.activityInactiveFg).frame(width: 48, height: 48)
+                    Image(systemName: "person.crop.circle").font(.system(size: 20))
+                        .foregroundStyle(t.titleBarFg.opacity(on ? 0.95 : 0.55)).frame(width: 40, height: 40)
                 }
             }
             .hoverEffectDisabled()
+            .tip("Accounts")
         }
         .buttonStyle(.plain)
-        .frame(width: 48)
-        .background(t.activityBarBg)
+        .padding(.vertical, 4)
+        .frame(width: 52 - WorkbenchView.gap) // the HStack's gap makes up the rest
     }
 
     private func explorer(_ t: VSTheme) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("REMOTE EXPLORER").font(.system(size: 11))
+                Text("Remote Explorer").font(.system(size: 13, weight: .semibold))
                 Spacer()
                 Button { Task { await account.refresh() } } label: { CodiconView(icon: .refresh) }.tip("Refresh")
             }
             .buttonStyle(ToolbarButtonStyle()).foregroundStyle(t.sideBarTitleFg)
-            .padding(.leading, 20).padding(.trailing, 10).frame(height: 35)
+            .padding(.leading, 14).padding(.trailing, 8).frame(height: 40)
 
             HStack(spacing: 4) {
                 CodiconView(icon: .chevronDown, size: 14)
@@ -178,14 +187,14 @@ struct MachinesView: View {
     }
 
     private func treeRow(_ m: MachineInfo, _ t: VSTheme) -> some View {
-        HStack(spacing: 6) {
-            CodiconView(icon: m.online ? .vmConnect : .vmOutline, size: 16)
+        HStack(spacing: 8) {
+            Image(systemName: osSymbol(m)).font(.system(size: 14)).frame(width: 18)
             Text(m.name).font(.system(size: 13)).lineLimit(1)
             Spacer()
-            Circle().fill(m.online ? SwiftUI.Color.green : SwiftUI.Color.gray).frame(width: 7, height: 7)
+            StatusDot(online: m.online)
         }
-        .padding(.leading, 24).padding(.trailing, 12).frame(height: 26)
-        .hoverBackground(m.online ? t.listHoverBg : .clear)
+        .padding(.leading, 20).padding(.trailing, 16).frame(height: 30)
+        .hoverBackground(m.online ? t.hoverFill : .clear, cornerRadius: 7, inset: 6)
         .contentShape(Rectangle())
         .onTapGesture { if m.online { open(m) } }
         .contextMenu { connectMenu(m) }
@@ -197,21 +206,32 @@ struct MachinesView: View {
     private func welcome(_ t: VSTheme) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("PadCode").font(.system(size: 34, weight: .light)).foregroundStyle(t.editorFg)
-                    Text("Your desktops, through VS Code Remote Tunnels")
-                        .font(.system(size: 17)).foregroundStyle(t.descriptionFg)
+                HStack(spacing: 16) {
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        .font(.system(size: 26, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 60, height: 60)
+                        .background(LinearGradient(colors: [t.accent, t.accent.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing),
+                                    in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .shadow(color: t.accent.opacity(0.45), radius: 14, y: 6)
+                        .symbolEffect(.bounce, value: appeared)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("PadCode").font(.system(size: 32, weight: .bold, design: .rounded)).foregroundStyle(t.editorFg)
+                        Text("Your desktops, through VS Code Remote Tunnels")
+                            .font(.system(size: 15)).foregroundStyle(t.descriptionFg)
+                    }
                 }
+                .rise(appeared, 0)
 
-                VStack(alignment: .leading, spacing: 10) {
-                    sectionTitle("Desktops", t)
+                VStack(alignment: .leading, spacing: 12) {
+                    sectionTitle("Desktops", t).rise(appeared, 1)
                     if account.machines.isEmpty && !account.loading {
                         Text("No desktops found for this GitHub account yet.")
                             .font(.system(size: 13)).foregroundStyle(t.descriptionFg)
                     }
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 280, maximum: 420), spacing: 16, alignment: .top)],
                               alignment: .leading, spacing: 16) {
-                        ForEach(account.machines, id: \.id) { m in card(m, t) }
+                        ForEach(Array(account.machines.enumerated()), id: \.element.id) { i, m in card(m, t).rise(appeared, 2 + i) }
                     }
                 }
 
@@ -225,9 +245,9 @@ struct MachinesView: View {
                         .font(.system(size: 13)).foregroundStyle(t.descriptionFg)
                     Text("code tunnel service install --accept-server-license-terms")
                         .font(.custom("Menlo", size: 12)).textSelection(.enabled)
-                        .padding(8).frame(maxWidth: 640, alignment: .leading)
+                        .padding(10).frame(maxWidth: 640, alignment: .leading)
                         .background(t.ui("textCodeBlock.background", "input.background", default: "#0a0a0a66"))
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     Text("It shows up here as running. The README has the steps for each OS.")
                         .font(.system(size: 12)).foregroundStyle(t.descriptionFg)
                 }
@@ -240,20 +260,22 @@ struct MachinesView: View {
     }
 
     private func sectionTitle(_ s: String, _ t: VSTheme) -> some View {
-        Text(s).font(.system(size: 19)).foregroundStyle(t.editorFg)
+        Text(s).font(.system(size: 19, weight: .semibold, design: .rounded)).foregroundStyle(t.editorFg)
     }
 
     private func card(_ m: MachineInfo, _ t: VSTheme) -> some View {
         let recents = Array((UserDefaults.standard.stringArray(forKey: "recentFolders.\(m.id)") ?? []).prefix(3))
         let os = account.knownOS[m.id].map { $0 == "mac" ? "macOS" : $0 == "windows" ? "Windows" : "Linux" }
         return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                CodiconView(icon: m.online ? .vmConnect : .vmOutline, size: 26)
-                    .foregroundStyle(m.online ? t.focusBorder : t.descriptionFg)
+            HStack(spacing: 12) {
+                Image(systemName: osSymbol(m)).font(.system(size: 20))
+                    .foregroundStyle(m.online ? t.accent : t.descriptionFg)
+                    .frame(width: 42, height: 42)
+                    .background((m.online ? t.accent : t.descriptionFg).opacity(0.14), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(m.name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
-                    HStack(spacing: 5) {
-                        Circle().fill(m.online ? SwiftUI.Color.green : SwiftUI.Color.gray).frame(width: 7, height: 7)
+                    HStack(spacing: 6) {
+                        StatusDot(online: m.online)
                         Text([m.online ? "Running" : "Offline", os].compactMap { $0 }.joined(separator: " · "))
                             .font(.system(size: 12)).foregroundStyle(t.descriptionFg)
                     }
@@ -280,12 +302,15 @@ struct MachinesView: View {
                 HStack {
                     Button { open(m) } label: {
                         Hovering { on in
-                            Text("Connect").font(.system(size: 13)).padding(.horizontal, 14).padding(.vertical, 5)
-                                .background(on ? t.ui("button.hoverBackground", "button.background", default: "#1177bb") : t.buttonBg)
+                            Label("Connect", systemImage: "arrow.right").labelStyle(TrailingIcon())
+                                .font(.system(size: 13, weight: .semibold)).padding(.horizontal, 16).padding(.vertical, 7)
+                                .background(on ? t.ui("button.hoverBackground", "button.background", default: "#1177bb") : t.buttonBg, in: Capsule())
                                 .foregroundStyle(t.buttonFg)
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                                .shadow(color: t.buttonBg.opacity(on ? 0.5 : 0), radius: 8, y: 3)
+                                .animation(.easeOut(duration: 0.15), value: on)
                         }
                     }
+                    .buttonStyle(PressDown())
                     .hoverEffectDisabled()
                     if UIApplication.shared.supportsMultipleScenes {
                         Button { openWindow(id: "workbench", value: WorkbenchTarget(machine: m)) } label: {
@@ -316,19 +341,17 @@ struct MachinesView: View {
 
     private func homeStatusBar(_ t: VSTheme) -> some View {
         let running = account.machines.filter(\.online).count
-        return HStack(spacing: 0) {
-            HStack(spacing: 4) {
-                CodiconView(icon: .remote, size: 14)
-                Text("Remote Tunnels").font(.system(size: 12))
-            }
-            .padding(.horizontal, 8).frame(maxHeight: .infinity)
-            .background(t.remoteBg).foregroundStyle(t.remoteFg)
-            Text("\(running) of \(account.machines.count) desktops running").font(.system(size: 12)).padding(.horizontal, 8)
+        return HStack(spacing: 8) {
+            StatusDot(online: running > 0)
+            Text("\(running) of \(account.machines.count) desktops running").font(.system(size: 12))
+                .contentTransition(.numericText())
+                .animation(Motion.pop, value: running)
             Spacer()
         }
-        .foregroundStyle(t.statusBarFg)
-        .frame(height: 22)
-        .background(t.statusBarBg)
+        .padding(.leading, 60)
+        .foregroundStyle(t.titleBarFg.opacity(0.7))
+        .frame(height: 26)
+        .background(t.canvasBg)
     }
 
     /// Connect here: in this window when it's the only one, else a new window.
@@ -382,10 +405,17 @@ private struct SignInView: View {
     var body: some View {
         let t = theme
         VStack(spacing: 18) {
-            CodiconView(icon: .remote, size: 64).foregroundStyle(t.focusBorder)
-            Text("PadCode").font(.system(size: 28, weight: .light))
+            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                .font(.system(size: 34, weight: .semibold)).foregroundStyle(.white)
+                .frame(width: 84, height: 84)
+                .background(LinearGradient(colors: [t.accent, t.accent.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing),
+                            in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .shadow(color: t.accent.opacity(0.45), radius: 18, y: 8)
+                .symbolEffect(.bounce, value: started)
+                .rise(started, 0)
+            Text("PadCode").font(.system(size: 30, weight: .bold, design: .rounded)).rise(started, 1)
             Text("Connect to your desktops through VS Code Remote Tunnels.")
-                .font(.system(size: 14)).foregroundStyle(t.descriptionFg)
+                .font(.system(size: 14)).foregroundStyle(t.descriptionFg).rise(started, 2)
             if let login = account.pendingLogin {
                 VStack(spacing: 10) {
                     Text("Enter this code on GitHub:").font(.system(size: 13))
@@ -400,7 +430,8 @@ private struct SignInView: View {
                     }
                     ProgressView("Waiting for approval…").font(.system(size: 12))
                 }
-                .padding(20).background(t.sideBarBg).clipShape(RoundedRectangle(cornerRadius: 8))
+                .padding(20).background(t.sideBarBg).clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .transition(.pop(from: .top))
             } else {
                 Button {
                     Task { await account.signIn() }
@@ -408,7 +439,8 @@ private struct SignInView: View {
                     Label("Sign in with GitHub", systemImage: "person.crop.circle")
                         .padding(.horizontal, 12).padding(.vertical, 4)
                 }
-                .buttonStyle(.borderedProminent).tint(t.buttonBg)
+                .buttonStyle(.borderedProminent).tint(t.buttonBg).buttonBorderShape(.capsule)
+                .rise(started, 3)
             }
             if let err = account.error {
                 Text(err).font(.system(size: 12)).foregroundStyle(t.errorFg)
@@ -416,6 +448,8 @@ private struct SignInView: View {
         }
         .foregroundStyle(t.editorFg)
         .padding(40)
+        .animation(Motion.popup, value: account.pendingLogin != nil)
+        .onAppear { started = true }
     }
 }
 
@@ -429,15 +463,43 @@ private struct CardHover: ViewModifier {
     func body(content: Content) -> some View {
         let t = theme
         let lifted = enabled && (on || Scenario.hoverAll)
+        let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
         content
-            .background(lifted ? t.ui("welcomePage.tileHoverBackground", "list.hoverBackground", default: "#2a2d2e")
-                        : t.ui("welcomePage.tileBackground", "editorWidget.background", default: "#252526"))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(lifted ? t.focusBorder.opacity(0.6)
-                                                              : t.ui("welcomePage.tileBorder", "widget.border", default: "#ffffff1a")))
-            .shadow(color: lifted ? t.widgetShadow : .clear, radius: 12, y: 6)
-            .offset(y: lifted ? -2 : 0)
-            .animation(.snappy(duration: 0.18), value: lifted)
+            .background(lifted ? t.raised : t.hoverFill, in: shape)
+            .overlay(shape.strokeBorder(lifted ? t.accent.opacity(0.5) : t.cardBorder))
+            .shadow(color: .black.opacity(lifted ? (t.isDark ? 0.35 : 0.12) : 0), radius: 16, y: 8)
+            .scaleEffect(lifted ? 1.012 : 1)
+            .offset(y: lifted ? -3 : 0)
+            .animation(Motion.pop, value: lifted)
             .onHover { on = $0 }
+    }
+}
+
+/// Online: a green dot that glows and breathes. Offline: a grey one.
+struct StatusDot: View {
+    let online: Bool
+    private static let green = Color(red: 0.35, green: 0.86, blue: 0.56)
+    var body: some View {
+        Image(systemName: "circle.fill").font(.system(size: 7))
+            .foregroundStyle(online ? Self.green : Color.gray.opacity(0.7))
+            .shadow(color: online ? Self.green.opacity(0.8) : .clear, radius: 3)
+            .symbolEffect(.pulse, isActive: online)
+    }
+}
+
+/// Title, then icon (the "Connect →" button).
+private struct TrailingIcon: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 6) { configuration.title; configuration.icon }
+    }
+}
+
+/// The desktop's OS, as a symbol.
+@MainActor private func osSymbol(_ m: MachineInfo) -> String {
+    switch Account.shared.knownOS[m.id] {
+    case "mac": "laptopcomputer"
+    case "windows": "pc"
+    case "linux": "server.rack"
+    default: "desktopcomputer"
     }
 }

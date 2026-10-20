@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// VS Code's title bar: the command center in the middle, layout actions on
-/// the right. It also keeps iPadOS's window controls off the content in
-/// windowed mode, the way the desktop title bar makes room for the traffic lights.
+/// The title bar, on the canvas: the command center in the middle, layout
+/// actions on the right. It also keeps iPadOS's window controls off the
+/// content in windowed mode.
 struct TitleBar<Leading: View, Trailing: View>: View {
     let theme: VSTheme
     let title: String
@@ -23,30 +23,30 @@ struct TitleBar<Leading: View, Trailing: View>: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(t.titleBarFg)
-        .frame(height: 34)
-        .background(t.titleBarBg)
-        .overlay(alignment: .bottom) { Rectangle().fill(t.titleBarBorder).frame(height: 1) }
+        .frame(height: 38)
+        .background(t.canvasBg)
     }
 
     private func commandCenter(_ t: VSTheme) -> some View {
         Button { onCommandCenter?() } label: {
             Hovering { on in
                 let hover = on && onCommandCenter != nil
-                HStack(spacing: 6) {
-                    CodiconView(icon: .search, size: 13)
-                    Text(title).font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
+                HStack(spacing: 7) {
+                    Image(systemName: "magnifyingglass").font(.system(size: 12, weight: .semibold))
+                        .symbolEffect(.bounce, value: hover)
+                    Text(title).font(.system(size: 12.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
                 }
-                .foregroundStyle(hover ? t.ui("commandCenter.activeForeground", "commandCenter.foreground", "titleBar.activeForeground", default: "#cccccc")
-                                 : t.ui("commandCenter.foreground", "titleBar.activeForeground", default: "#cccccc"))
+                .foregroundStyle(t.titleBarFg.opacity(hover ? 1 : 0.78))
                 .frame(maxWidth: 480)
-                .frame(height: 24)
-                .padding(.horizontal, 10)
-                .background(hover ? t.ui("commandCenter.activeBackground", default: "#ffffff14") : t.ui("commandCenter.background", default: "#ffffff0d"))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(hover ? t.ui("commandCenter.activeBorder", "commandCenter.border", default: "#ffffff4d")
-                                                                   : t.ui("commandCenter.border", default: "#ffffff26")))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .frame(height: 28)
+                .padding(.horizontal, 12)
+                .background(hover ? t.raised : t.hoverFill, in: Capsule())
+                .overlay(Capsule().strokeBorder(t.cardBorder))
+                .scaleEffect(hover ? 1.015 : 1)
+                .animation(Motion.pop, value: hover)
             }
         }
+        .buttonStyle(PressDown())
         .hoverEffectDisabled()
         .disabled(onCommandCenter == nil)
         .padding(.horizontal, 160) // keep clear of the side actions
@@ -72,20 +72,40 @@ struct TitleBarMenu<Items: View>: View {
     }
 }
 
-/// A title-bar icon button.
+/// A title-bar icon button. With an SF Symbol, swapping the symbol (a panel
+/// shown or hidden) morphs one into the other.
 struct TitleBarButton: View {
-    let icon: Codicon
+    var icon: Codicon? = nil
+    var symbol: String? = nil
     let label: String
     var active = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            CodiconView(icon: icon, size: 16)
-                .opacity(active ? 1 : 0.75)
-                .frame(width: 28, height: 28)
+            Group {
+                if let symbol {
+                    Image(systemName: symbol).font(.system(size: 15, weight: .regular))
+                        .contentTransition(.symbolEffect(.replace.downUp))
+                } else if let icon {
+                    CodiconView(icon: icon, size: 16)
+                }
+            }
+            .opacity(active ? 1 : 0.72)
+            .frame(width: 30, height: 30)
+            .animation(Motion.pop, value: symbol)
         }
         .buttonStyle(ToolbarButtonStyle(padding: 0))
         .tip(label)
+    }
+}
+
+/// Pressing dips the label; it springs back on release.
+struct PressDown: ButtonStyle {
+    var scale: CGFloat = 0.96
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? scale : 1)
+            .animation(Motion.pop, value: configuration.isPressed)
     }
 }

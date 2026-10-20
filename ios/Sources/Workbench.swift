@@ -11,6 +11,8 @@ struct WorkbenchView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var sidebarWidth: CGFloat = 280
     @State private var panelHeight: CGFloat = 260
+    /// Space between panels, and around them.
+    static let gap: CGFloat = 6
 
     var body: some View {
         let t = wb.theme
@@ -29,15 +31,25 @@ struct WorkbenchView: View {
                         }
                     }
                 }
-                TitleBarButton(icon: .layoutSidebarLeft, label: "Toggle Primary Side Bar", active: wb.side != nil) {
+                TitleBarButton(symbol: wb.zen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                               label: wb.zen ? "Leave Zen Mode" : "Zen Mode", active: wb.zen) {
+                    wb.toggleZen()
+                }
+                TitleBarButton(symbol: wb.side != nil ? "rectangle.leadingthird.inset.filled" : "rectangle",
+                               label: "Toggle Primary Side Bar", active: wb.side != nil) {
                     wb.toggleSidebar()
                 }
-                TitleBarButton(icon: .layoutPanel, label: "Toggle Panel", active: wb.panelOpen) {
+                TitleBarButton(symbol: wb.panelOpen ? "rectangle.bottomthird.inset.filled" : "rectangle",
+                               label: "Toggle Panel", active: wb.panelOpen) {
                     wb.togglePanel()
                 }
             }
+            // Panels float on the canvas; the gaps between them are the resize handles.
             HStack(spacing: 0) {
-                ActivityBar()
+                if !wb.zen {
+                    ActivityBar().zIndex(1) // the side bar slides out from under it
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                }
                 if let side = wb.side {
                     Group {
                         switch side {
@@ -47,41 +59,65 @@ struct WorkbenchView: View {
                         }
                     }
                     .frame(width: sidebarWidth)
-                    .background(t.sideBarBg)
+                    .card(t, fill: t.sideBarBg)
                     .transition(.move(edge: .leading).combined(with: .opacity))
                     Sash(axis: .vertical, value: $sidebarWidth, range: 170...600)
                 }
                 VStack(spacing: 0) {
-                    EditorArea()
+                    let maximized = wb.panelOpen && wb.panelMaximized
+                    if !maximized {
+                        // Zen mode: a centered column, like a page.
+                        EditorArea()
+                            .frame(maxWidth: wb.zen ? 1040 : .infinity)
+                            .frame(maxWidth: .infinity)
+                    }
                     if wb.panelOpen {
-                        Sash(axis: .horizontal, value: $panelHeight, range: 80...900, sign: -1)
+                        if !maximized { Sash(axis: .horizontal, value: $panelHeight, range: 80...900, sign: -1) }
                         // Slides at its full height: the terminal isn't resized frame by frame.
-                        TerminalPanel().frame(height: panelHeight)
+                        // No fade: fading the terminal (a UIKit view) renders it offscreen every frame.
+                        TerminalPanel()
+                            .frame(height: maximized ? nil : panelHeight)
+                            .frame(maxHeight: maximized ? .infinity : nil)
+                            .card(t, fill: t.panelBg)
                             .transition(.move(edge: .bottom))
                     }
                 }
             }
-            StatusBar()
+            .padding(.leading, wb.zen ? Self.gap : 0)
+            .padding(.trailing, Self.gap)
+            .padding(.bottom, wb.zen ? Self.gap : 0)
+            if !wb.zen {
+                StatusBar().transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
         .avoidKeyboard()
-        .background(t.editorBg)
+        .background(t.canvasBg)
         .overlay(alignment: .top) {
-            Group {
-                if wb.quickOpen { QuickOpen() }
-                if wb.palette { CommandPalette() }
+            // Pickers drop in under the title bar over a light scrim.
+            let open = [wb.quickOpen, wb.palette, wb.symbolPicker, wb.workspaceSymbolPicker, wb.taskPicker, wb.gotoLine]
+            ZStack(alignment: .top) {
+                if open.contains(true) {
+                    Color.black.opacity(t.isDark ? 0.18 : 0.08).ignoresSafeArea().allowsHitTesting(false)
+                        .transition(.opacity)
+                }
+                Group {
+                    if wb.quickOpen { QuickOpen() }
+                    if wb.palette { CommandPalette() }
+                    if wb.symbolPicker { SymbolPicker() }
+                    if wb.workspaceSymbolPicker { WorkspaceSymbolPicker() }
+                    if wb.taskPicker { TaskPicker() }
+                    if wb.gotoLine { GotoLinePicker() }
+                }
+                .transition(.pop())
             }
-            .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
-            .animation(.snappy(duration: 0.16), value: wb.quickOpen)
-            .animation(.snappy(duration: 0.16), value: wb.palette)
+            .animation(Motion.popup, value: open)
             if wb.picker && wb.desktop != nil { FolderPicker() }
-            if wb.symbolPicker { SymbolPicker() }
-            if wb.taskPicker { TaskPicker() }
             LanguageOverlays()
-            if wb.gotoLine { GotoLinePicker() }
         }
         .overlay {
             if wb.desktop == nil { ConnectingOverlay() }
         }
+        .animation(Motion.popup, value: wb.desktop == nil)
         .overlay(alignment: .bottomTrailing) { TransferToast(wb: wb) }
         .environmentObject(wb)
         .environmentObject(wb.languages)
@@ -158,9 +194,9 @@ extension WorkbenchView {
     }
 }
 
-/// Draggable divider between workbench parts: a 1 pt line with a wider UIKit
-/// grab area on top, which shows the iPad resize pointer and VS Code's hover
-/// highlight.
+/// The gap between two panels, which resizes them: a small grabber that
+/// grows and lights up under the pointer, with a wider UIKit grab area on top
+/// for the iPad resize pointer.
 private struct Sash: View {
     enum Axis { case vertical, horizontal }
     let axis: Axis
@@ -173,12 +209,13 @@ private struct Sash: View {
 
     var body: some View {
         let vertical = axis == .vertical
-        Rectangle()
-            .fill(vertical ? wb.theme.ui("sideBar.border", default: "#00000000") : .clear)
-            .frame(width: vertical ? 1 : nil, height: vertical ? nil : 1)
+        let t = wb.theme
+        Color.clear
+            .frame(width: vertical ? WorkbenchView.gap : nil, height: vertical ? nil : WorkbenchView.gap)
             .overlay {
-                Rectangle().fill(wb.theme.sashHover).opacity(active ? 1 : 0)
-                    .frame(width: vertical ? 4 : nil, height: vertical ? nil : 4)
+                Capsule().fill(active ? t.sashHover : t.cardBorder.opacity(1.6))
+                    .frame(width: vertical ? 3 : (active ? 64 : 28), height: vertical ? (active ? 64 : 28) : 3)
+                    .animation(Motion.pop, value: active)
                     .allowsHitTesting(false)
             }
             .overlay {
@@ -251,15 +288,17 @@ final class SashView: UIView, UIPointerInteractionDelegate {
     }
 }
 
+/// The views down the left, on the canvas. The selected one sits on a pill
+/// that slides between them; its symbol bounces when picked.
 private struct ActivityBar: View {
     @EnvironmentObject var wb: Workbench
     @Namespace private var indicator
     var body: some View {
         let t = wb.theme
-        VStack(spacing: 0) {
-            item(.files, .explorer).tip("Explorer (⇧⌘E)")
-            item(.search, .search).tip("Search (⇧⌘F)")
-            item(.listTree, .outline).tip("Outline")
+        VStack(spacing: 4) {
+            ActivityItem(symbol: "doc.on.doc", view: .explorer, indicator: indicator).tip("Explorer (⇧⌘E)")
+            ActivityItem(symbol: "magnifyingglass", view: .search, indicator: indicator).tip("Search (⇧⌘F)")
+            ActivityItem(symbol: "list.bullet.indent", view: .outline, indicator: indicator).tip("Outline")
             Spacer()
             Menu {
                 Button("Settings  ⌘,") { wb.settingsOpen = true }
@@ -270,35 +309,53 @@ private struct ActivityBar: View {
                 Button("Sign Out", role: .destructive) { Account.shared.signOut() }
             } label: {
                 Hovering { on in
-                    CodiconView(icon: .settingsGear, size: 24).foregroundStyle(on ? t.activityFg : t.activityInactiveFg).frame(width: 48, height: 48)
+                    Image(systemName: "gearshape").font(.system(size: 19))
+                        .foregroundStyle(t.titleBarFg.opacity(on ? 0.95 : 0.55))
+                        .rotationEffect(.degrees(on ? 45 : 0))
+                        .animation(Motion.pop, value: on)
+                        .frame(width: 40, height: 40)
                 }
             }
             .hoverEffectDisabled()
             .tip("Manage")
         }
-        .frame(width: 48)
-        .background(t.activityBarBg)
+        .padding(.vertical, 4)
+        .frame(width: 52)
+        .background(t.canvasBg)
     }
+}
 
-    private func item(_ icon: Codicon, _ view: SideView) -> some View {
+private struct ActivityItem: View {
+    let symbol: String
+    let view: SideView
+    let indicator: Namespace.ID
+    @EnvironmentObject var wb: Workbench
+    @State private var bounce = 0
+
+    var body: some View {
+        let t = wb.theme
         let active = wb.side == view
-        return Button {
-            if active || wb.side == nil { wb.toggleSidebar(view) } else { wb.side = view }
+        Button {
+            bounce += 1
+            if active || wb.side == nil { wb.toggleSidebar(view) } else { withAnimation(Motion.pop) { wb.side = view } }
         } label: {
             Hovering { on in
-                CodiconView(icon: icon, size: 24)
-                    .foregroundStyle(active || on ? wb.theme.activityFg : wb.theme.activityInactiveFg)
-                    .frame(width: 48, height: 48)
-                    .overlay(alignment: .leading) {
+                Image(systemName: symbol).font(.system(size: 18, weight: active ? .semibold : .regular))
+                    .symbolEffect(.bounce.down, value: bounce)
+                    .foregroundStyle(active ? t.accent : t.titleBarFg.opacity(on ? 0.95 : 0.55))
+                    .frame(width: 40, height: 40)
+                    .background {
                         if active {
-                            Rectangle().fill(wb.theme.activityBorderActive).frame(width: 2)
+                            RoundedRectangle(cornerRadius: 10, style: .continuous).fill(t.accent.opacity(0.16))
                                 .matchedGeometryEffect(id: "active", in: indicator)
+                        } else if on {
+                            RoundedRectangle(cornerRadius: 10, style: .continuous).fill(t.hoverFill)
                         }
                     }
-                    .animation(Workbench.layoutAnimation, value: wb.side)
+                    .animation(.easeOut(duration: 0.12), value: on)
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressDown(scale: 0.9))
         .hoverEffectDisabled()
     }
 }
@@ -326,8 +383,10 @@ private struct ProblemCounts: View {
                 Text("\(c.warnings)")
             }
             .font(.system(size: 12)).padding(.horizontal, 8)
-            .frame(maxHeight: .infinity)
-            .hoverBackground(wb.theme.statusItemHoverBg)
+            .frame(height: 20)
+            .hoverBackground(wb.theme.hoverFill, cornerRadius: 10)
+            .contentTransition(.numericText())
+            .animation(Motion.pop, value: c.errors + c.warnings)
         }
         .buttonStyle(.plain)
         .hoverEffectDisabled()
@@ -365,12 +424,24 @@ private struct LanguageStatus: View {
                          : "Install one on the desktop to get errors, completions and go to definition:\n\n\(missing.install)\n\nThen tap Retry.")
                 }
             } else if let busy = languages.progress(for: file.path) {
-                CodiconView(icon: .sync, size: 12)
+                Spinner()
                 Text(busy).lineLimit(1).frame(maxWidth: 220)
             } else if let name = languages.serverName(for: file.path) {
-                Text("{ } \(name)").foregroundStyle(wb.theme.statusBarFg.opacity(0.85))
+                Text("{ } \(name)")
             }
             Text(Language.displayName(for: file.name))
+        }
+    }
+}
+
+/// The language server working: a turning symbol.
+private struct Spinner: View {
+    var body: some View {
+        if #available(iOS 18.0, *) {
+            Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 10, weight: .semibold))
+                .symbolEffect(.rotate, isActive: true)
+        } else {
+            ProgressView().scaleEffect(0.5).frame(width: 12, height: 12)
         }
     }
 }
@@ -384,15 +455,19 @@ private struct StatusBar: View {
                 Button("Reconnect") { Task { await wb.reconnect() } }
                 Button("Close Remote Connection") { closeWindow() }
             } label: {
-                HStack(spacing: 4) {
-                    CodiconView(icon: .remote, size: 14)
-                    Text("Tunnel: \(wb.machine.name)").font(.system(size: 12))
+                Hovering { on in
+                    HStack(spacing: 5) {
+                        StatusDot(online: wb.desktop != nil)
+                        Text(wb.machine.name).font(.system(size: 11.5, weight: .medium))
+                    }
+                    .padding(.horizontal, 9).frame(height: 20)
+                    .background(on ? t.raised : t.hoverFill, in: Capsule())
+                    .overlay(Capsule().strokeBorder(t.cardBorder))
                 }
-                .padding(.horizontal, 8).frame(maxHeight: .infinity)
-                .hoverBackground(t.remoteHoverBg)
-                .background(t.remoteBg).foregroundStyle(t.remoteFg)
             }
+            .buttonStyle(PressDown())
             .hoverEffectDisabled()
+            .padding(.leading, 52 + 2) // lines up with the panels, past the activity bar
             .help("Remote Tunnel: \(wb.machine.name)")
             if !wb.osLabel.isEmpty {
                 Text(wb.osLabel).font(.system(size: 12)).padding(.horizontal, 8)
@@ -416,10 +491,10 @@ private struct StatusBar: View {
             }
             CodiconView(icon: .bell, size: 14).padding(.horizontal, 8)
         }
-        .foregroundStyle(t.statusBarFg)
-        .frame(height: 22)
-        .background(t.statusBarBg)
-        .overlay(alignment: .top) { Rectangle().fill(t.statusBarBorder).frame(height: 1) }
+        .foregroundStyle(t.titleBarFg.opacity(0.7))
+        .frame(height: 26)
+        .padding(.trailing, WorkbenchView.gap)
+        .background(t.canvasBg)
     }
 
     private func closeWindow() {
@@ -435,20 +510,29 @@ struct ConnectingOverlay: View {
         let t = wb.theme
         VStack(spacing: 14) {
             if let err = wb.connectError {
-                CodiconView(icon: .debugDisconnect, size: 40).foregroundStyle(t.errorFg)
+                Image(systemName: "bolt.horizontal.circle").font(.system(size: 40, weight: .light))
+                    .foregroundStyle(t.errorFg)
+                    .symbolEffect(.bounce, value: err)
                 Text("Could not connect to \(wb.machine.name)").font(.headline)
                 Text(err).font(.system(size: 13)).foregroundStyle(t.descriptionFg).multilineTextAlignment(.center)
                 Button("Retry") { Task { await wb.connect() } }
-                    .buttonStyle(.borderedProminent).tint(t.buttonBg)
+                    .buttonStyle(.borderedProminent).tint(t.buttonBg).buttonBorderShape(.capsule)
             } else {
-                ProgressView()
-                Text(wb.status).font(.system(size: 13)).foregroundStyle(t.descriptionFg)
+                // Waves going out while the tunnel comes up.
+                Image(systemName: "antenna.radiowaves.left.and.right").font(.system(size: 36, weight: .light))
+                    .foregroundStyle(t.accent)
+                    .symbolEffect(.variableColor.iterative.reversing, isActive: true)
+                Text(wb.status).font(.system(size: 13, weight: .medium)).foregroundStyle(t.descriptionFg)
+                    .contentTransition(.opacity)
+                    .animation(.easeInOut(duration: 0.2), value: wb.status)
             }
         }
-        .padding(30).frame(maxWidth: 420)
-        .background(t.quickInputBg).clipShape(RoundedRectangle(cornerRadius: 8))
-        .shadow(color: t.widgetShadow, radius: 12)
+        .padding(32).frame(maxWidth: 420)
+        .glass(t.quickInputBg, radius: 22)
+        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(t.widgetBorder))
+        .shadow(color: .black.opacity(t.isDark ? 0.4 : 0.15), radius: 30, y: 12)
         .foregroundStyle(t.quickInputFg)
+        .transition(.pop(from: .center))
     }
 }
 
@@ -464,46 +548,61 @@ struct QuickPickList<Item: Identifiable>: View {
     @EnvironmentObject var wb: Workbench
     @FocusState private var focused: Bool
     @State private var selection = 0
+    @Namespace private var pill
+    private static var rowHeight: CGFloat { 28 }
 
     var body: some View {
         let t = wb.theme
         VStack(spacing: 0) {
-            TextField(placeholder, text: $query)
-                .textFieldStyle(.plain).font(.system(size: 13))
-                .textInputAutocapitalization(.never).autocorrectionDisabled()
-                .padding(6).background(t.inputBg, in: RoundedRectangle(cornerRadius: 4)).foregroundStyle(t.inputFg)
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(t.focusBorder))
-                .padding(6)
-                .focused($focused)
-                .onSubmit { if let i = items.indices.contains(selection) ? items[selection] : items.first { pick(i) } }
-                .onKeyPress(.downArrow) { selection = min(selection + 1, max(items.count - 1, 0)); return .handled }
-                .onKeyPress(.upArrow) { selection = max(selection - 1, 0); return .handled }
-                .onKeyPress(.escape) { dismiss(); return .handled }
-                .onChange(of: query) { selection = 0 }
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(t.accent)
+                TextField(placeholder, text: $query)
+                    .textFieldStyle(.plain).font(.system(size: 15))
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .foregroundStyle(t.inputFg)
+                    .focused($focused)
+                    .onSubmit { if let i = items.indices.contains(selection) ? items[selection] : items.first { pick(i) } }
+                    .onKeyPress(.downArrow) { selection = min(selection + 1, max(items.count - 1, 0)); return .handled }
+                    .onKeyPress(.upArrow) { selection = max(selection - 1, 0); return .handled }
+                    .onKeyPress(.escape) { dismiss(); return .handled }
+                    .onChange(of: query) { selection = 0 }
+            }
+            .padding(.horizontal, 14).frame(height: 46)
+            if !items.isEmpty { Rectangle().fill(t.cardBorder).frame(height: 1) }
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(Array(items.prefix(200).enumerated()), id: \.element.id) { i, item in
                             row(item)
-                                .padding(.horizontal, 8).frame(height: 24).frame(maxWidth: .infinity, alignment: .leading)
-                                .background { if i == selection { RoundedRectangle(cornerRadius: 4).fill(t.listActiveBg) } }
-                                .hoverBackground(i == selection ? .clear : t.listHoverBg, cornerRadius: 4)
+                                .padding(.horizontal, 10).frame(height: Self.rowHeight).frame(maxWidth: .infinity, alignment: .leading)
+                                .background {
+                                    // The selection is one pill that glides between rows.
+                                    if i == selection {
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous).fill(t.accent.opacity(0.22))
+                                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(t.accent.opacity(0.35)))
+                                            .matchedGeometryEffect(id: "selection", in: pill)
+                                    }
+                                }
+                                .hoverBackground(i == selection ? .clear : t.hoverFill, cornerRadius: 8)
                                 .foregroundStyle(i == selection ? t.listActiveFg : t.quickInputFg)
                                 .contentShape(Rectangle())
                                 .onTapGesture { pick(item) }
                                 .id(i)
                         }
                     }
-                    .padding(.horizontal, 6).padding(.bottom, items.isEmpty ? 0 : 6)
+                    .padding(6)
+                    .animation(Motion.pop, value: selection)
                 }
                 .onChange(of: selection) { proxy.scrollTo(selection) }
             }
-            .frame(height: min(CGFloat(min(items.count, 200)) * 24 + (items.isEmpty ? 0 : 6), 420)) // fits its rows, like VS Code
+            .frame(height: min(CGFloat(min(items.count, 200)) * Self.rowHeight + (items.isEmpty ? 0 : 12), 440)) // fits its rows
+            .animation(Motion.layout, value: min(items.count, 16))
         }
-        .frame(width: 600)
-        .floatingSurface(t.quickInputBg, cornerRadius: 8)
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(t.widgetBorder))
-        .shadow(color: t.widgetShadow, radius: 16, y: 6)
+        .frame(width: 640)
+        .glass(t.quickInputBg, radius: 16)
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(t.widgetBorder))
+        .shadow(color: .black.opacity(t.isDark ? 0.4 : 0.15), radius: 30, y: 14)
         // Centered in the window, just under the title bar, like VS Code;
         // tapping anywhere else dismisses.
         .padding(.top, 40)
@@ -623,6 +722,15 @@ struct Command: Identifiable {
         Command(title: "Terminal: Move Terminal into New Window", keys: "") { wb in
             if let id = wb.activeTerminal { wb.moveTerminalToNewWindow(id) }
         },
+        Command(title: "Terminal: Run Selected Text in Active Terminal", keys: "") { $0.runSelectionInTerminal() },
+        Command(title: "Terminal: Clear", keys: "⌘K") { wb in
+            (wb.terminals.first { $0.id == wb.activeTerminal }?.view as? PadTerminalView)?.clearTerminal()
+        },
+        Command(title: "Terminal: Find", keys: "⌘F") { wb in
+            wb.panelOpen = true
+            wb.panelTab = .terminal
+            wb.terminals.first { $0.id == wb.activeTerminal }?.finding = true
+        },
         Command(title: "Terminal: Focus Terminal", keys: "") { wb in
             wb.panelOpen = true
             wb.panelTab = .terminal
@@ -633,6 +741,11 @@ struct Command: Identifiable {
         Command(title: "File: Open Folder…", keys: "⌘O") { $0.picker = true },
         Command(title: "File: Close Folder", keys: "") { $0.closeFolder() },
         Command(title: "File: New Window", keys: "⇧⌘N") { $0.newWindow() },
+        Command(title: "View: Toggle Zen Mode", keys: "") { $0.toggleZen() },
+        Command(title: "View: Toggle Maximized Panel", keys: "") { wb in
+            wb.panelMaximized.toggle()
+            if !wb.panelOpen { withAnimation(Workbench.layoutAnimation) { wb.panelOpen = true } }
+        },
         Command(title: "View: Split Editor Right", keys: "⌘\\") { $0.splitRight() },
         Command(title: "Run File", keys: "⌃F5") { $0.runActiveFile() },
         Command(title: "Tasks: Run Task…", keys: "⇧⌘B") { $0.taskPicker = true },
@@ -649,6 +762,7 @@ struct Command: Identifiable {
         },
         Command(title: "Go to Line/Column…", keys: "⌃G") { wb in if wb.activeFile?.viewer == .text { wb.gotoLine = true } },
         Command(title: "Go to Symbol in Editor…", keys: "⇧⌘O") { wb in if wb.activeFile?.viewer == .text { wb.symbolPicker = true } },
+        Command(title: "Go to Symbol in Workspace…", keys: "") { $0.workspaceSymbolPicker = true },
         Command(title: "View: Show Outline", keys: "") { $0.side = .outline },
         Command(title: "Format Document", keys: "⇧⌥F") { wb in if let p = wb.active { Task { await wb.languages.format(p) } } },
         Command(title: "Markdown: Open Preview to the Side", keys: "⌘K V") { wb in if let p = wb.active { wb.openMarkdownPreview(p) } },
@@ -666,6 +780,8 @@ struct Command: Identifiable {
         Command(title: "Trigger Suggest", keys: "⌃Space") { $0.languages.requestCompletion() },
         Command(title: "Show or Focus Hover", keys: "⌘K ⌘I") { $0.languages.showHover() },
         Command(title: "Go to Definition", keys: "F12") { $0.languages.goToDefinition() },
+        Command(title: "Go to Next Problem (Error, Warning, Info)", keys: "F8") { $0.languages.goToProblem(forward: true) },
+        Command(title: "Go to Previous Problem (Error, Warning, Info)", keys: "⇧F8") { $0.languages.goToProblem(forward: false) },
         Command(title: "View: Toggle Problems", keys: "⇧⌘M") { wb in
             wb.panelOpen = !(wb.panelOpen && wb.panelTab == .problems)
             wb.panelTab = .problems

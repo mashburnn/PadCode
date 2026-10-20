@@ -109,9 +109,9 @@ struct FolderPicker: View {
             .foregroundStyle(t.quickInputFg)
         }
         .frame(width: 640)
-        .background(t.quickInputBg)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .shadow(color: t.widgetShadow, radius: 10)
+        .glass(t.quickInputBg, radius: 16)
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(t.widgetBorder))
+        .shadow(color: .black.opacity(t.isDark ? 0.4 : 0.15), radius: 30, y: 14)
         .padding(.top, 40)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .task(id: parts.base) { await load(parts.base) }

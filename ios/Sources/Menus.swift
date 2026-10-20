@@ -74,6 +74,7 @@ struct PadCommands: Commands {
             Divider()
             Button("Toggle Primary Side Bar") { wb?.toggleSidebar() }.keyboardShortcut("b")
             Button("Toggle Panel") { wb?.togglePanel() }.keyboardShortcut("j")
+            Button("Zen Mode") { wb?.toggleZen() }
             Button("Split Editor Right") { wb?.splitRight() }.keyboardShortcut("\\")
             Divider()
             Button("Word Wrap") { AppSettings.shared.wordWrap.toggle() }.keyboardShortcut("z", modifiers: .option)
@@ -88,11 +89,16 @@ struct PadCommands: Commands {
             Button("Go to File…") { wb?.quickOpen = true }.keyboardShortcut("p")
             Button("Go to Symbol in Editor…") { if wb?.activeFile?.viewer == .text { wb?.symbolPicker = true } }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
+            if wb?.terminalsOnly == nil { // a terminal window has no pickers
+                Button("Go to Symbol in Workspace…") { wb?.workspaceSymbolPicker = true }.disabled(wb?.root.isEmpty ?? true)
+            }
             Button("Go to Line/Column…   ⌃G") { if wb?.activeFile?.viewer == .text { wb?.gotoLine = true } }
             Divider()
             Button("Go to Definition   F12") { wb?.languages.goToDefinition() }
             Button("Find All References   ⇧F12") { wb?.languages.findReferences() }
             Button("Show Hover   ⌘K ⌘I") { wb?.languages.showHover() }
+            Button("Next Problem   F8") { wb?.languages.goToProblem(forward: true) }
+            Button("Previous Problem   ⇧F8") { wb?.languages.goToProblem(forward: false) }
             Divider()
             Button("Next Editor") { wb?.cycleTab(1) }.keyboardShortcut("]", modifiers: [.command, .shift])
             Button("Previous Editor") { wb?.cycleTab(-1) }.keyboardShortcut("[", modifiers: [.command, .shift])
@@ -101,6 +107,7 @@ struct PadCommands: Commands {
         }
         CommandMenu("Run") {
             Button("Run File   ⌃F5") { wb?.runActiveFile() }.disabled(wb?.activeFile?.viewer != .text)
+            Button("Run Selected Text in Terminal") { wb?.runSelectionInTerminal() }.disabled(wb?.activeFile?.viewer != .text || wb?.desktop == nil)
             Button("Run Task…") { wb?.taskPicker = true }.keyboardShortcut("b", modifiers: [.command, .shift]).disabled(wb?.root.isEmpty ?? true)
         }
         CommandMenu("Terminal") {

@@ -234,26 +234,36 @@ struct TransferToast: View {
                     }
             }
         }
-        .padding(.trailing, 12).padding(.bottom, 34)
-        .animation(.snappy(duration: 0.22), value: wb.transfer ?? wb.toast)
-        .animation(.snappy(duration: 0.22), value: wb.alert)
+        .padding(.trailing, 16).padding(.bottom, 40)
+        .animation(Motion.popup, value: wb.transfer ?? wb.toast)
+        .animation(Motion.popup, value: wb.alert)
     }
 
+    /// Every notification is the same glass; its kind shows in the icon well.
     private func toast(_ t: VSTheme, _ msg: String, icon: Codicon?, color: Color, close: (() -> Void)?) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            if let icon { CodiconView(icon: icon, size: 16).foregroundStyle(color) } else { ProgressView().scaleEffect(0.7).frame(width: 16, height: 16) }
+        HStack(alignment: .center, spacing: 10) {
+            ZStack {
+                Circle().fill(color.opacity(0.18))
+                if let icon {
+                    CodiconView(icon: icon, size: 15).foregroundStyle(color)
+                        .symbolBounceIn()
+                } else {
+                    ProgressView().scaleEffect(0.6).tint(color)
+                }
+            }
+            .frame(width: 28, height: 28)
             Text(msg).font(.system(size: 13)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
             if let close {
                 Button(action: close) { CodiconView(icon: .close, size: 14) }
-                    .buttonStyle(ToolbarButtonStyle(padding: 2)).tip("Clear Notification")
+                    .buttonStyle(ToolbarButtonStyle(padding: 3)).tip("Clear Notification")
             }
         }
-        .padding(.horizontal, 12).padding(.vertical, 10)
+        .padding(.leading, 10).padding(.trailing, 8).padding(.vertical, 10)
         .frame(width: 400)
         .foregroundStyle(t.ui("notifications.foreground", "editor.foreground", default: "#cccccc"))
-        .floatingSurface(t.ui("notifications.background", "editorWidget.background", default: "#252526"), cornerRadius: 6)
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(t.ui("notifications.border", "notificationToast.border", "widget.border", default: "#ffffff14")))
-        .shadow(color: t.widgetShadow, radius: 10, y: 4)
-        .transition(.move(edge: .trailing).combined(with: .opacity))
+        .glass(t.ui("notifications.background", "editorWidget.background", default: "#252526"), radius: 16)
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(t.widgetBorder))
+        .shadow(color: .black.opacity(t.isDark ? 0.35 : 0.12), radius: 18, y: 8)
+        .transition(.pop(from: .bottomTrailing))
     }
 }

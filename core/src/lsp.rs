@@ -79,13 +79,13 @@ pub fn install_hint(key: &str, os: Os) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Pos {
     pub line: u32,
     pub character: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Range {
     pub start: Pos,
     pub end: Pos,
@@ -112,6 +112,15 @@ pub struct Completion {
     pub insert_text: String,
     /// Range to replace; None means "the word before the cursor".
     pub edit_range: Option<Range>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceSymbol {
+    pub name: String,
+    pub kind: u8,
+    /// The enclosing type or module, shown greyed out after the name.
+    pub container: Option<String>,
+    pub location: Location,
 }
 
 #[derive(Debug, Clone)]
@@ -562,6 +571,27 @@ impl LanguageServer {
         Ok(parse_symbols(&v))
     }
 
+    /// Symbols anywhere in the workspace whose name matches `query` (⌘T).
+    pub async fn workspace_symbols(&self, query: &str) -> Result<Vec<WorkspaceSymbol>> {
+        let v = self.request("workspace/symbol", json!({ "query": query }), REQUEST_TIMEOUT).await?;
+        Ok(v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| {
+                        let uri = s["location"]["uri"].as_str()?;
+                        Some(WorkspaceSymbol {
+                            name: s["name"].as_str()?.to_string(),
+                            kind: s["kind"].as_u64().unwrap_or(0) as u8,
+                            container: s["containerName"].as_str().filter(|c| !c.is_empty()).map(str::to_string),
+                            // WorkspaceSymbol may leave out the range until resolved: top of the file then.
+                            location: Location { path: self.path_for(uri), range: parse_range(&s["location"]["range"]).unwrap_or_default() },
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     /// Edits that format the whole document.
     pub async fn format(&self, path: &str, tab_size: u32, insert_spaces: bool) -> Result<Vec<TextEdit>> {
         let uri = path_to_uri(self.os, path);
@@ -713,7 +743,7 @@ fn client_capabilities() -> Value {
     json!({
         "general": { "positionEncodings": ["utf-16"] },
         "window": { "workDoneProgress": true },
-        "workspace": { "configuration": true, "workspaceFolders": true, "applyEdit": true, "workspaceEdit": { "documentChanges": true } },
+        "workspace": { "configuration": true, "workspaceFolders": true, "applyEdit": true, "workspaceEdit": { "documentChanges": true }, "symbol": {} },
         "textDocument": {
             "synchronization": { "didSave": true },
             "completion": {

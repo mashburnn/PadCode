@@ -143,6 +143,7 @@ enum Scenario {
         if wants("terminal-window") { await terminalWindow(wb, d, root) }
         if wants("anim") { await animations(wb, p("big.log")) }
         if wants("visuals") { await visuals(wb, d, root) }
+        if wants("layout") { await layoutModes(wb, p("point.c"), p("hello.py"), p("README.md")) }
         if wants("switchloop") {
             // For a profiler: 40 s of tab switches.
             let fs = ["big.log", "point.c", "messy.c", "src/main.rs", "README.md"].map(p)
@@ -277,6 +278,16 @@ enum Scenario {
         wb.symbolPicker = true
         await shot("symbol-picker")
         wb.symbolPicker = false
+        // Workspace symbols: clangd knows `point` (point.c is open) without opening anything else.
+        var found: [WorkspaceSymbol] = []
+        for _ in 0..<20 where !found.contains(where: { $0.name == "point" }) { // clangd indexes in the background
+            found = await wb.languages.workspaceSymbols("point")
+            if !found.contains(where: { $0.name == "point" }) { try? await Task.sleep(for: .seconds(1)) }
+        }
+        check("nav.workspace-symbols", found.first?.name == "point", found.prefix(5).map { "\($0.name)@\(wb.relative($0.path)):\($0.selection.start.line + 1)" }.joined(separator: ","))
+        wb.workspaceSymbolPicker = true
+        await shot("workspace-symbols")
+        wb.workspaceSymbolPicker = false
         wb.gotoLine = true
         await shot("goto-line")
         wb.gotoLine = false
@@ -297,6 +308,7 @@ enum Scenario {
         wb.openMarkdownPreview(md)
         let pv = MarkdownPreview.previewPath(for: md)
         check("markdown.preview", wb.groups.contains { $0.active == pv })
+        check("markdown.preview-name", wb.file(pv)?.name == "README.md", wb.file(pv)?.name ?? "nil")
         await shot("markdown-preview", wait: 4)
         // Edits flow into the preview.
         if let text = wb.file(md)?.text { wb.setText(md, text + "\n## Live edit\n") }
@@ -472,6 +484,18 @@ enum Scenario {
         ]
         let bad = cases.filter { $0.1 != $0.2 }.map(\.0)
         check("lines.transforms", bad.isEmpty, bad.isEmpty ? "\(cases.count) cases" : bad.joined(separator: ","))
+        let links = [("src/main.rs:12:5", "src/main.rs 12 5"), ("/a/b.py:3", "/a/b.py 3 -"), ("./x.c:", "./x.c - -"),
+                     ("file:///a/b%20c.txt", "/a/b c.txt - -"), ("https://x.dev/a:1", "nil"), ("mailto:a@b", "nil")]
+            .filter { link, want in
+                let got = TerminalSession.fileLink(link).map { "\($0.path) \($0.line.map(String.init) ?? "-") \($0.column.map(String.init) ?? "-")" } ?? "nil"
+                return got != want
+            }
+        check("terminal.file-links", links.isEmpty, links.map(\.0).joined(separator: ","))
+        let t = TerminalSession(title: "links", cwd: wb.root)
+        t.workbench = wb
+        t.openLink("./point.c:6:3")
+        let opened = await until(3) { wb.active == path && wb.file(path)?.cursor.line == 6 }
+        check("terminal.file-link-opens", opened, "\(wb.active ?? "nil") line \(wb.file(path)?.cursor.line ?? 0)")
 
         // In the editor: ⌘/ is one undoable edit that marks the file dirty.
         guard let tv = await open(wb, path) as? PadTextView else { return check("lines.editor", false, "no editor") }
@@ -990,6 +1014,15 @@ enum Scenario {
         tv.selectedRange = NSRange(location: ns.range(of: "area(20)").location, length: 0)
         _ = await until(30) { !(wb.languages.diagnostics[path] ?? []).isEmpty }
         check("visuals.squiggle", tv.highlightedRanges.contains { $0.id.hasPrefix("diag") && $0.cornerRadius < 0 })
+        // F8 from the top lands on the error (`undefined_name`), with its hover.
+        tv.selectedRange = NSRange(location: 0, length: 0)
+        wb.languages.goToProblem(forward: true)
+        let atError = ns.substring(with: NSRange(location: tv.selectedRange.location, length: 14)) == "undefined_name"
+        _ = await until(5) { wb.languages.hover != nil }
+        check("visuals.next-problem", atError && wb.languages.hover?.text.contains("undefined") == true, wb.languages.hover?.text.prefix(60).description ?? "no hover")
+        await shot("visuals-next-problem")
+        wb.languages.hover = nil
+        tv.selectedRange = NSRange(location: ns.range(of: "area(20)").location, length: 0)
         await shot("visuals-editor")
         wb.palette = true
         try? await Task.sleep(for: .milliseconds(500))
@@ -1002,6 +1035,53 @@ enum Scenario {
         try? await d.remove(path: path)
     }
 
+    /// Zen mode, the maximized panel, and reordering tabs by dragging.
+    static func layoutModes(_ wb: Workbench, _ a: String, _ b: String, _ c: String) async {
+        for p in [a, b, c] { _ = await open(wb, p) }
+        let g = wb.focusedGroup
+        wb.side = .explorer
+        wb.panelOpen = true
+        wb.toggleZen()
+        try? await Task.sleep(for: .milliseconds(600))
+        await shot("zen")
+        check("layout.zen", wb.zen && wb.side == nil && !wb.panelOpen)
+        wb.toggleZen()
+        try? await Task.sleep(for: .milliseconds(600))
+        check("layout.zen-restores", !wb.zen && wb.side == .explorer && wb.panelOpen)
+        wb.panelMaximized = true
+        try? await Task.sleep(for: .milliseconds(500))
+        await shot("panel-maximized")
+        let editorGone = wb.editors["\(g):\(c)"]?.tv?.window == nil
+        wb.panelMaximized = false
+        try? await Task.sleep(for: .milliseconds(500))
+        check("layout.panel-maximized", editorGone && wb.editors["\(g):\(c)"]?.tv?.window != nil)
+        // Drag c over a: c takes a's place; then a back over c.
+        let before = wb.groups[g].tabs
+        wb.moveTab(c, onto: a, in: g)
+        let moved = wb.groups[g].tabs
+        wb.moveTab(a, onto: c, in: g)
+        check("layout.tab-reorder", moved.firstIndex(of: c) == before.firstIndex(of: a) && wb.groups[g].tabs.firstIndex(of: a)! < wb.groups[g].tabs.firstIndex(of: c)!,
+              "\(moved.map { wb.baseName($0) }) then \(wb.groups[g].tabs.map { wb.baseName($0) })")
+        // A hidden terminal keeps its old, wider size; that mustn't widen the panel
+        // (it pushed the window sideways: Explorer cut off, panel past the edge).
+        wb.panelTab = .terminal
+        if wb.terminals.isEmpty { wb.newTerminal() }
+        wb.side = nil
+        try? await Task.sleep(for: .seconds(1))
+        wb.panelTab = .ports
+        wb.side = .explorer
+        try? await Task.sleep(for: .seconds(1))
+        await shot("ports-after-sidebar")
+        if let term = wb.terminals.last?.view.superview, let tv = wb.editors["\(g):\(c)"]?.tv {
+            let panelX = term.convert(term.bounds, to: nil).minX, editorX = tv.convert(tv.bounds, to: nil).minX
+            check("layout.hidden-terminal-width", abs(panelX - editorX) < 20, "panel at \(Int(panelX)), editor at \(Int(editorX))")
+        } else { check("layout.hidden-terminal-width", false, "no views") }
+        wb.panelTab = .terminal
+        // A dragged tab dropped on an Explorer folder must not move the file.
+        check("layout.tab-drag-marked", (TabDrag.mark + a).hasPrefix(TabDrag.mark) && !wb.isWithin(TabDrag.mark + a, wb.root))
+        for p in [a, b, c] { wb.closeEverywhere(p) }
+    }
+
     static func animations(_ wb: Workbench, _ path: String) async {
         _ = await open(wb, path)
         if wb.terminals.isEmpty { wb.newTerminal() }
@@ -1012,20 +1092,26 @@ enum Scenario {
         let clock = FrameClock()
         for (name, toggle) in [("sidebar", { wb.toggleSidebar() }), ("panel", { wb.togglePanel() })] as [(String, () -> Void)] {
             var dropped = 0, frames = 0, worst = 0.0
+            var each: [String] = [] // per toggle: missed frames @ frame index of the worst gap
             let resizesBefore = s.resizeCount
             for _ in 0..<6 {
                 toggle()
                 var last = await clock.next()
                 let start = last
+                var mine = 0, worstHere = 0.0, worstAt = 0, n = 0
                 while last - start < 0.3 {
                     let now = await clock.next()
-                    worst = max(worst, now - last)
-                    dropped += max(0, Int(((now - last) / clock.period).rounded()) - 1)
-                    frames += 1
+                    n += 1
+                    if now - last > worstHere { worstHere = now - last; worstAt = n }
+                    mine += max(0, Int(((now - last) / clock.period).rounded()) - 1)
                     last = now
                 }
+                worst = max(worst, worstHere)
+                dropped += mine
+                frames += n
+                each.append("\(mine)@\(worstAt)")
             }
-            check("anim.\(name)", dropped <= frames / 10, String(format: "%d of %d frames missed, worst %.1f ms", dropped, frames + dropped, worst * 1000))
+            check("anim.\(name)", dropped <= frames / 10, String(format: "%d of %d frames missed, worst %.1f ms [%@]", dropped, frames + dropped, worst * 1000, each.joined(separator: " ")))
             if name == "panel" { check("anim.panel-no-resize-storm", s.resizeCount - resizesBefore <= 2, "\(s.resizeCount - resizesBefore) resizes sent") }
         }
         clock.stop()
@@ -1203,6 +1289,32 @@ enum Scenario {
         check("termselect.two-finger-scroll", takesTrackpad && !blocked && v.gestureRecognizerShouldBegin(pan))
         await shot("terminal-select")
         v.clearSelection()
+        // ⌘F finds in the scrollback; ⌘K clears it and the prompt comes back.
+        s.finding = true
+        let found = v.findNext("PADSEL-abc")
+        let summary = v.searchMatchSummary("PADSEL-abc")
+        try? await Task.sleep(for: .milliseconds(400))
+        await shot("terminal-find")
+        check("terminal.find", found && summary.total >= 1, "\(summary.index) of \(summary.total)")
+        v.clearSearch()
+        s.finding = false
+        s.send("seq 1 200\r")
+        try? await Task.sleep(for: .seconds(1))
+        let tall = v.contentSize.height
+        (v as? PadTerminalView)?.clearTerminal()
+        _ = await until(3) { v.contentSize.height < tall }
+        check("terminal.clear", v.contentSize.height < tall, "\(Int(tall)) -> \(Int(v.contentSize.height)) pt")
+        // Run Selected Text: the caret's line goes to this (active) terminal.
+        let script = wb.root + "/run-selection.sh"
+        try? await wb.desktop?.writeFile(path: script, data: Data("echo PADRUN-$((6*7))\n".utf8))
+        if let tv = await open(wb, script) as? PadTextView {
+            tv.selectedRange = NSRange(location: 2, length: 0)
+            wb.runSelectionInTerminal()
+            let ran = await until(5) { v.searchMatchSummary("PADRUN-42").total > 0 } // the output, not the echoed command
+            check("terminal.run-selection", ran && wb.activeTerminal == s.id)
+            wb.closeEverywhere(script)
+        } else { check("terminal.run-selection", false, "no editor") }
+        try? await wb.desktop?.remove(path: script)
         // Closing tabs: the neighbor takes over; the last one closes the panel.
         wb.newTerminal(title: "second")
         wb.newTerminal(title: "third")

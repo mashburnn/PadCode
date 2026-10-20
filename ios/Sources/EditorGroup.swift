@@ -1,18 +1,23 @@
 import Runestone
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
-/// VS Code's editor area: one or two editor groups side by side.
+/// The editor area: one or two editor groups side by side, each its own card;
+/// with two, the focused one's edge is lit.
 struct EditorArea: View {
     @EnvironmentObject var wb: Workbench
 
     var body: some View {
-        HStack(spacing: 0) {
+        let t = wb.theme
+        HStack(spacing: WorkbenchView.gap) {
             ForEach(Array(wb.groups.enumerated()), id: \.element.id) { i, _ in
-                if i > 0 { Rectangle().fill(wb.theme.ui("editorGroup.border", default: "#444444")).frame(width: 1) }
                 EditorGroup(index: i)
+                    .card(t, fill: t.editorBg, highlighted: wb.groups.count > 1 && wb.focusedGroup == i)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
+        .animation(Motion.layout, value: wb.groups.count)
         .overlay { HoverPopup() }
         .overlay { SignaturePopup() }
         .overlay { CompletionPopup() }
@@ -36,16 +41,17 @@ struct EditorGroup: View {
                 HStack(spacing: 0) {
                     ScrollViewReader { proxy in
                         ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 0) {
+                            HStack(spacing: 3) {
                                 ForEach(group.tabs, id: \.self) { path in
                                     if let f = wb.file(path) {
                                         EditorTab(file: f, group: index, tabs: tabs).id(path)
-                                            .transition(.opacity.combined(with: .move(edge: .top)))
+                                            .transition(.pop(from: .bottom))
                                     }
                                 }
                             }
+                            .padding(.horizontal, 6)
                             .animation(Workbench.layoutAnimation, value: group.tabs)
-                            .animation(Workbench.layoutAnimation, value: group.active)
+                            .animation(Motion.pop, value: group.active)
                         }
                         // Keep the active tab in view, as VS Code does.
                         .onChange(of: group.active) { _, p in
@@ -54,9 +60,9 @@ struct EditorGroup: View {
                     }
                     GroupActions(index: index, file: file)
                 }
-                .frame(height: 35)
-                .background(t.tabsBg)
-                .opacity(focused || wb.groups.count == 1 ? 1 : 0.85)
+                .frame(height: 40)
+                .overlay(alignment: .bottom) { Rectangle().fill(t.cardBorder).frame(height: 1) }
+                .opacity(focused || wb.groups.count == 1 ? 1 : 0.8)
                 if let file, file.viewer == .text || file.viewer == .markdownPreview { Breadcrumbs(file: file) }
             }
             ZStack {
@@ -92,7 +98,7 @@ private struct GroupActions: View {
                 Button { wb.runActiveFile() } label: { CodiconView(icon: .play, size: 16) }
                     .tip("Run File")
             }
-            if let file, Language.id(for: file.name) == "markdown" {
+            if let file, file.viewer == .text, Language.id(for: file.name) == "markdown" {
                 Button { wb.openMarkdownPreview(file.path) } label: { CodiconView(icon: .openPreview, size: 16) }
                     .tip("Open Preview to the Side")
             }
@@ -123,46 +129,81 @@ private struct EditorTab: View {
         let title = file.viewer == .markdownPreview ? "Preview \(file.name)"
             : file.viewer == .browser ? "Port \(file.path.replacingOccurrences(of: "port:", with: ""))" : file.name
         let twin = wb.groups.indices.contains(group) && wb.groups[group].tabs.contains { $0 != file.path && wb.baseName($0) == file.name }
+        let lit = active && (wb.focusedGroup == group || wb.groups.count == 1)
         HStack(spacing: 6) {
             if file.viewer == .markdownPreview || file.viewer == .browser {
                 CodiconView(icon: file.viewer == .browser ? .globe : .openPreview, size: 14).foregroundStyle(t.highlightFg)
             } else {
                 FileIcon(name: file.name, size: 14)
             }
-            Text(title).font(.system(size: 13)).lineLimit(1)
+            Text(title).font(.system(size: 13, weight: active ? .medium : .regular)).lineLimit(1)
                 .foregroundStyle(active ? t.tabActiveFg : hover ? t.tabHoverFg : t.tabInactiveFg)
             if twin, file.viewer == .text {
                 Text(wb.baseName(wb.parentDir(file.path))).font(.system(size: 12)).lineLimit(1).foregroundStyle(t.descriptionFg)
             }
+            // Unsaved: a dot, which turns into × under the pointer.
             Button { wb.close(file.path, in: group) } label: {
-                if file.dirty && !hover {
-                    CodiconView(icon: .circleFilled, size: 10).foregroundStyle(t.modifiedDot)
-                } else {
-                    CodiconView(icon: .close, size: 14)
-                        .foregroundStyle(active ? t.tabActiveFg : t.tabInactiveFg)
-                        .opacity(active || hover ? 1 : 0)
+                ZStack {
+                    if file.dirty && !hover {
+                        Circle().fill(t.modifiedDot).frame(width: 7, height: 7)
+                            .transition(.scale(scale: 0.2).combined(with: .opacity))
+                    } else {
+                        CodiconView(icon: .close, size: 14)
+                            .foregroundStyle(active ? t.tabActiveFg : t.tabInactiveFg)
+                            .opacity(active || hover ? 1 : 0)
+                            .transition(.scale(scale: 0.6).combined(with: .opacity))
+                    }
                 }
+                .frame(width: 16, height: 16)
+                .animation(Motion.pop, value: file.dirty && !hover)
             }
             .buttonStyle(ToolbarButtonStyle(padding: 2))
             .frame(width: 20)
         }
-        .padding(.leading, 10).padding(.trailing, 6)
-        .frame(height: 35)
-        .background(active ? t.tabActiveBg : hover ? t.tabHoverBg : t.tabInactiveBg)
-        .overlay(alignment: .top) {
-            if active && wb.focusedGroup == group {
-                Rectangle().fill(t.tabActiveBorderTop).frame(height: 1).matchedGeometryEffect(id: "top", in: tabs)
+        .padding(.leading, 10).padding(.trailing, 4)
+        .frame(height: 28)
+        .background {
+            // The active tab's pill slides from tab to tab.
+            if active {
+                RoundedRectangle(cornerRadius: 8, style: .continuous).fill(t.raised)
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(t.cardBorder))
+                    .overlay(alignment: .bottom) {
+                        if lit { Capsule().fill(t.accent).frame(width: 14, height: 2.5).offset(y: -1.5) }
+                    }
+                    .matchedGeometryEffect(id: "active", in: tabs)
+            } else if hover {
+                RoundedRectangle(cornerRadius: 8, style: .continuous).fill(t.hoverFill)
             }
         }
-        .overlay(alignment: .trailing) { Rectangle().fill(t.tabBorder).frame(width: 1) }
+        .frame(height: 40)
+        .animation(.easeOut(duration: 0.12), value: hover)
         .contentShape(Rectangle())
         .onTapGesture { wb.focus(file.path, in: group) }
         .onHover { hover = $0 }
+        // Drag a tab over the others to reorder them, or onto the other group.
+        .onDrag {
+            wb.draggingTab = file.path
+            let p = NSItemProvider()
+            // Private to this app, and marked, so an Explorer folder won't take it for a file to move.
+            p.registerObject((TabDrag.mark + file.path) as NSString, visibility: .ownProcess)
+            return p
+        }
+        .onDrop(of: [.plainText], delegate: TabDrag(target: file.path, group: group, wb: wb))
         .contextMenu {
             Button("Close") { wb.close(file.path, in: group) }
             Button("Close Others") {
                 for p in wb.groups[group].tabs where p != file.path { wb.close(p, in: group) }
             }
+            Button("Close to the Right") {
+                for p in wb.groups[group].tabs.drop(while: { $0 != file.path }).dropFirst() { wb.close(p, in: group) }
+            }
+            Button("Close Saved") {
+                for p in wb.groups[group].tabs where wb.file(p)?.dirty != true { wb.close(p, in: group) }
+            }
+            Button("Close All") {
+                for p in wb.groups[group].tabs { wb.close(p, in: group) }
+            }
+            Divider()
             if wb.groups.count == 1 {
                 Button("Split Right") { wb.focus(file.path, in: group); wb.splitRight() }
             } else {
@@ -177,6 +218,27 @@ private struct EditorTab: View {
     }
 }
 
+/// A tab dragged over this one takes its place, live, so the strip makes room
+/// as you go.
+struct TabDrag: DropDelegate {
+    static let mark = "padcode-tab:"
+    let target: String
+    let group: Int
+    let wb: Workbench
+
+    func validateDrop(info: DropInfo) -> Bool { wb.draggingTab != nil }
+    func dropEntered(info: DropInfo) {
+        guard let from = wb.draggingTab, wb.groups.indices.contains(group), wb.groups[group].tabs.contains(from) else { return }
+        wb.moveTab(from, onto: target, in: group)
+    }
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+    func performDrop(info: DropInfo) -> Bool {
+        if let from = wb.draggingTab { wb.moveTab(from, onto: target, in: group) } // from the other group
+        wb.draggingTab = nil
+        return true
+    }
+}
+
 /// Path, then the symbols around the caret (VS Code's breadcrumbs). Each
 /// symbol opens a menu of its siblings to jump to.
 private struct Breadcrumbs: View {
@@ -187,7 +249,7 @@ private struct Breadcrumbs: View {
 
     var body: some View {
         let t = wb.theme
-        let parts = wb.relative(file.path).split(whereSeparator: { $0 == "/" || $0 == "\\" }).map(String.init)
+        let parts = wb.relative(MarkdownPreview.sourcePath(file.path)).split(whereSeparator: { $0 == "/" || $0 == "\\" }).map(String.init)
         let chain = wb.active == file.path ? Self.chain(outline.symbols, line: status.line - 1) : []
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 2) {
@@ -265,22 +327,35 @@ private struct Breadcrumbs: View {
     }
 }
 
+/// The empty editor: the app's mark, then shortcuts; it assembles itself
+/// (a short staggered rise) each time it appears.
 private struct Watermark: View {
     @EnvironmentObject var wb: Workbench
+    @State private var appeared = false
+
     var body: some View {
-        VStack(spacing: 10) {
-            CodiconView(icon: .remote, size: 96).opacity(0.08)
-            if wb.root.isEmpty { start }
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
-                row("Show All Commands", "⇧ ⌘ P")
-                row("Go to File", "⌘ P")
-                row("Find in Files", "⇧ ⌘ F")
-                row("Toggle Terminal", "⌃ `")
-                row("Toggle Sidebar", "⌘ B")
+        let t = wb.theme
+        VStack(spacing: 14) {
+            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                .font(.system(size: 54, weight: .light))
+                .foregroundStyle(LinearGradient(colors: [t.accent, t.accent.opacity(0.35)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                .opacity(0.5)
+                .symbolEffect(.bounce, value: appeared)
+                .rise(appeared, 0)
+                .padding(.bottom, 6)
+            if wb.root.isEmpty { start.rise(appeared, 1) }
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 9) {
+                row("Show All Commands", "⇧ ⌘ P").rise(appeared, 2)
+                row("Go to File", "⌘ P").rise(appeared, 3)
+                row("Find in Files", "⇧ ⌘ F").rise(appeared, 4)
+                row("Toggle Terminal", "⌃ `").rise(appeared, 5)
+                row("Toggle Sidebar", "⌘ B").rise(appeared, 6)
             }
             .font(.system(size: 13))
-            .foregroundStyle(wb.theme.descriptionFg)
+            .foregroundStyle(t.descriptionFg)
         }
+        .onAppear { appeared = true }
+        .onDisappear { appeared = false }
     }
 
     /// VS Code's Welcome "Start" and "Recent" lists, shown until a folder is open.
@@ -377,6 +452,8 @@ struct CodeEditor: UIViewRepresentable {
             case "references": langs.findReferences()
             case "quickfix": langs.showCodeActions()
             case "run": langs.wb?.runActiveFile()
+            case "nextProblem": langs.goToProblem(forward: true)
+            case "prevProblem": langs.goToProblem(forward: false)
             default: langs.requestSignature(tv, path: langs.activePath ?? "")
             }
         }
@@ -425,6 +502,7 @@ struct CodeEditor: UIViewRepresentable {
             let edit = UIMenu(options: .displayInline, children: [
                 item("Format Document", "text.alignleft", hasServer) { Task { await langs.format(path) } },
                 item("Toggle Line Comment", "number") { tv.toggleComment() },
+                item("Run Selected Text in Terminal", "terminal") { langs.wb?.runSelectionInTerminal() },
             ])
             return [code, edit]
         }

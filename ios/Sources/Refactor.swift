@@ -259,9 +259,9 @@ struct SignaturePopup: View {
                 .fixedSize()
                 .foregroundStyle(t.ui("editorHoverWidget.foreground", "editor.foreground", default: "#cccccc"))
                 .background(t.ui("editorHoverWidget.background", "editorWidget.background", default: "#252526"))
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(t.ui("editorHoverWidget.border", default: "#454545")))
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-                .shadow(color: t.widgetShadow, radius: 4)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(t.widgetBorder))
+                .shadow(color: .black.opacity(t.isDark ? 0.3 : 0.1), radius: 8, y: 3)
                 .offset(x: max(s.anchor.minX - origin.x - 12, 4), y: max(s.anchor.minY - origin.y - 34 - (s.sig.doc == nil ? 0 : 20), 2))
                 .onTapGesture { languages.signature = nil }
             }
