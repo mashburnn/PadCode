@@ -238,7 +238,7 @@ open class TextView: UIScrollView {
         }
     }
     /// The point at which the origin of the content view is offset from the origin of the scroll view.
-    override public var contentOffset: CGPoint {
+    override open var contentOffset: CGPoint { // padcode: open, so PadCode can follow scrolling
         didSet {
             if contentOffset != oldValue {
                 textInputView.viewport = CGRect(origin: contentOffset, size: frame.size)

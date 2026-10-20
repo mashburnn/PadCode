@@ -18,6 +18,18 @@ struct PadCodeApp: App {
                 MachinesView() // restored window whose desktop can't be read: show home
             }
         }
+        // Terminals on their own (Terminal: Move Terminal into New Window).
+        WindowGroup(id: "terminals", for: TerminalWindowTarget.self) { $target in
+            if let target {
+                TerminalWindowView(wb: Workbench(machine: target.machine, folder: target.folder, terminals: target.terminals),
+                                   target: $target)
+            } else {
+                MachinesView()
+            }
+        }
+        // With Windowed Apps on, a terminal opens as a terminal-sized window
+        // (about 110 × 34) rather than filling the screen.
+        .defaultSize(width: 900, height: 620)
     }
 }
 
@@ -291,9 +303,7 @@ struct MachinesView: View {
         .foregroundStyle(t.editorFg)
         .padding(16)
         .frame(maxWidth: .infinity, minHeight: 130, alignment: .topLeading)
-        .background(t.ui("welcomePage.tileBackground", "editorWidget.background", default: "#252526"))
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(t.ui("welcomePage.tileBorder", "widget.border", default: "#ffffff1a")))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .modifier(CardHover(theme: t, enabled: m.online))
         .opacity(m.online ? 1 : 0.65)
         .contextMenu { if m.online { connectMenu(m) } }
     }
@@ -330,6 +340,14 @@ struct MachinesView: View {
             opened = target
         }
     }
+}
+
+/// A terminal window: the desktop's persistent shells it shows, by session ID.
+struct TerminalWindowTarget: Codable, Hashable {
+    let machine: MachineInfo
+    var folder: String?
+    var terminals: [String] = []
+    var nonce = UUID() // every request opens a new window (see WorkbenchTarget)
 }
 
 /// What a workbench window opens: a desktop and, optionally, a folder on it.
@@ -401,3 +419,25 @@ private struct SignInView: View {
     }
 }
 
+
+/// A welcome-page tile that lifts under the pointer: brighter border and background, a shadow.
+private struct CardHover: ViewModifier {
+    let theme: VSTheme
+    let enabled: Bool
+    @State private var on = false
+
+    func body(content: Content) -> some View {
+        let t = theme
+        let lifted = enabled && (on || Scenario.hoverAll)
+        content
+            .background(lifted ? t.ui("welcomePage.tileHoverBackground", "list.hoverBackground", default: "#2a2d2e")
+                        : t.ui("welcomePage.tileBackground", "editorWidget.background", default: "#252526"))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(lifted ? t.focusBorder.opacity(0.6)
+                                                              : t.ui("welcomePage.tileBorder", "widget.border", default: "#ffffff1a")))
+            .shadow(color: lifted ? t.widgetShadow : .clear, radius: 12, y: 6)
+            .offset(y: lifted ? -2 : 0)
+            .animation(.snappy(duration: 0.18), value: lifted)
+            .onHover { on = $0 }
+    }
+}

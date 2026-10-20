@@ -17,7 +17,12 @@ struct PadCommands: Commands {
         CommandGroup(replacing: .saveItem) {
             Button("Save") { Task { await wb?.save() } }.keyboardShortcut("s").disabled(wb?.activeFile?.viewer != .text)
             Button("Revert File") { if let p = wb?.active { Task { await wb?.revert(p) } } }.disabled(wb?.activeFile?.viewer != .text)
-            Button("Close Editor") { if let a = wb?.active { wb?.close(a) } }.keyboardShortcut("w").disabled(wb?.active == nil)
+            // ⌘W closes the editor tab, or in a terminal window the terminal tab.
+            Button(wb?.terminalsOnly != nil ? "Close Terminal" : "Close Editor") {
+                if let w = wb, w.terminalsOnly != nil { if let id = w.activeTerminal { w.killTerminal(id) } }
+                else if let a = wb?.active { wb?.close(a) }
+            }
+            .keyboardShortcut("w").disabled(wb?.terminalsOnly != nil ? wb?.activeTerminal == nil : wb?.active == nil)
             Button("Reopen Closed Editor") { wb?.reopenClosed() }.keyboardShortcut("t", modifiers: [.command, .shift])
             Divider()
             Button("Upload from iPad…") { wb?.uploadTarget = wb?.root }.disabled(wb?.root.isEmpty ?? true)
@@ -67,13 +72,14 @@ struct PadCommands: Commands {
             Button("Terminal") { wb?.toggleTerminal() }.keyboardShortcut("`", modifiers: .control)
             Button("Ports") { wb?.panelOpen = true; wb?.panelTab = .ports }
             Divider()
-            Button("Toggle Primary Side Bar") { if let w = wb { w.side = w.side == nil ? .explorer : nil } }.keyboardShortcut("b")
+            Button("Toggle Primary Side Bar") { wb?.toggleSidebar() }.keyboardShortcut("b")
             Button("Toggle Panel") { wb?.togglePanel() }.keyboardShortcut("j")
             Button("Split Editor Right") { wb?.splitRight() }.keyboardShortcut("\\")
             Divider()
             Button("Word Wrap") { AppSettings.shared.wordWrap.toggle() }.keyboardShortcut("z", modifiers: .option)
             Button("Zoom In") { if let w = wb { w.fontSize = min(w.fontSize + 1, 32) } }.keyboardShortcut("=")
             Button("Zoom Out") { if let w = wb { w.fontSize = max(w.fontSize - 1, 8) } }.keyboardShortcut("-")
+            Button("Reset Zoom") { wb?.fontSize = 12 }.keyboardShortcut("0")
         }
         CommandMenu("Go") {
             Button("Back") { wb?.goBack() }.keyboardShortcut("-", modifiers: .control)
@@ -99,6 +105,22 @@ struct PadCommands: Commands {
         }
         CommandMenu("Terminal") {
             Button("New Terminal") { wb?.newTerminal() }.disabled(wb?.desktop == nil)
+            Button("New Terminal Window") { wb?.openTerminalWindow() }.disabled(wb?.desktop == nil)
+            if wb?.terminalsOnly != nil {
+                // Terminal.app's ⌘T, ⇧⌘[ ⇧⌘] and ⌘1…9 in a terminal window.
+                Button("New Terminal Tab") { wb?.newTerminal() }.keyboardShortcut("t").disabled(wb?.desktop == nil)
+                Button("Show Previous Tab") { wb?.cycleTerminal(-1) }.keyboardShortcut("[", modifiers: [.command, .shift])
+                Button("Show Next Tab") { wb?.cycleTerminal(1) }.keyboardShortcut("]", modifiers: [.command, .shift])
+                ForEach(1..<10) { n in
+                    Button("Terminal \(n)") { if let w = wb, w.terminals.indices.contains(n - 1) { w.focusTerminal(w.terminals[n - 1].id) } }
+                        .keyboardShortcut(KeyEquivalent(Character("\(n)")))
+                        .disabled((wb?.terminals.count ?? 0) < n)
+                }
+                Button("Move Terminal into Editor Window") { if let w = wb, let id = w.activeTerminal { w.moveTerminalToEditorWindow(id) } }
+                    .disabled(wb?.editorWindow == nil || wb?.activeTerminal == nil)
+            }
+            Button("Move Terminal into New Window") { if let w = wb, let id = w.activeTerminal { w.moveTerminalToNewWindow(id) } }
+                .disabled(wb?.activeTerminal == nil)
             Button("Kill Terminal") { if let w = wb, let id = w.activeTerminal { w.killTerminal(id) } }.disabled(wb?.activeTerminal == nil)
             Divider()
             Button("Reconnect to Desktop") { Task { await wb?.reconnect() } }.disabled(wb == nil)

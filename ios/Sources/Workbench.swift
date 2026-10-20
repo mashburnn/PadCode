@@ -30,7 +30,7 @@ struct WorkbenchView: View {
                     }
                 }
                 TitleBarButton(icon: .layoutSidebarLeft, label: "Toggle Primary Side Bar", active: wb.side != nil) {
-                    wb.side = wb.side == nil ? .explorer : nil
+                    wb.toggleSidebar()
                 }
                 TitleBarButton(icon: .layoutPanel, label: "Toggle Panel", active: wb.panelOpen) {
                     wb.togglePanel()
@@ -48,13 +48,16 @@ struct WorkbenchView: View {
                     }
                     .frame(width: sidebarWidth)
                     .background(t.sideBarBg)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
                     Sash(axis: .vertical, value: $sidebarWidth, range: 170...600)
                 }
                 VStack(spacing: 0) {
                     EditorArea()
                     if wb.panelOpen {
                         Sash(axis: .horizontal, value: $panelHeight, range: 80...900, sign: -1)
+                        // Slides at its full height: the terminal isn't resized frame by frame.
                         TerminalPanel().frame(height: panelHeight)
+                            .transition(.move(edge: .bottom))
                     }
                 }
             }
@@ -63,8 +66,13 @@ struct WorkbenchView: View {
         .avoidKeyboard()
         .background(t.editorBg)
         .overlay(alignment: .top) {
-            if wb.quickOpen { QuickOpen() }
-            if wb.palette { CommandPalette() }
+            Group {
+                if wb.quickOpen { QuickOpen() }
+                if wb.palette { CommandPalette() }
+            }
+            .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
+            .animation(.snappy(duration: 0.16), value: wb.quickOpen)
+            .animation(.snappy(duration: 0.16), value: wb.palette)
             if wb.picker && wb.desktop != nil { FolderPicker() }
             if wb.symbolPicker { SymbolPicker() }
             if wb.taskPicker { TaskPicker() }
@@ -74,7 +82,7 @@ struct WorkbenchView: View {
         .overlay {
             if wb.desktop == nil { ConnectingOverlay() }
         }
-        .overlay(alignment: .bottom) { TransferToast(wb: wb) }
+        .overlay(alignment: .bottomTrailing) { TransferToast(wb: wb) }
         .environmentObject(wb)
         .environmentObject(wb.languages)
         .environmentObject(wb.editorStatus)
@@ -115,11 +123,9 @@ struct WorkbenchView: View {
             wb.openWindowAction = openWindow
             if sizeClass == .compact { wb.side = nil }
         }
+        .background(WindowProbe { wb.scene = $0?.windowScene })
         .onChange(of: wb.root) { _, root in
             if !root.isEmpty { target?.wrappedValue?.folder = root }
-        }
-        .alert(wb.alert ?? "", isPresented: Binding(get: { wb.alert != nil }, set: { if !$0 { wb.alert = nil } })) {
-            Button("OK", role: .cancel) {}
         }
         .alert("The file has been changed on disk", isPresented: Binding(get: { wb.conflict != nil }, set: { if !$0 { wb.conflict = nil } })) {
             Button("Overwrite") { if let p = wb.conflict { Task { await wb.save(p, force: true) } } }
@@ -247,6 +253,7 @@ final class SashView: UIView, UIPointerInteractionDelegate {
 
 private struct ActivityBar: View {
     @EnvironmentObject var wb: Workbench
+    @Namespace private var indicator
     var body: some View {
         let t = wb.theme
         VStack(spacing: 0) {
@@ -276,15 +283,19 @@ private struct ActivityBar: View {
     private func item(_ icon: Codicon, _ view: SideView) -> some View {
         let active = wb.side == view
         return Button {
-            wb.side = active ? nil : view
+            if active || wb.side == nil { wb.toggleSidebar(view) } else { wb.side = view }
         } label: {
             Hovering { on in
                 CodiconView(icon: icon, size: 24)
                     .foregroundStyle(active || on ? wb.theme.activityFg : wb.theme.activityInactiveFg)
                     .frame(width: 48, height: 48)
                     .overlay(alignment: .leading) {
-                        if active { Rectangle().fill(wb.theme.activityBorderActive).frame(width: 2) }
+                        if active {
+                            Rectangle().fill(wb.theme.activityBorderActive).frame(width: 2)
+                                .matchedGeometryEffect(id: "active", in: indicator)
+                        }
                     }
+                    .animation(Workbench.layoutAnimation, value: wb.side)
             }
         }
         .buttonStyle(.plain)
@@ -418,7 +429,7 @@ private struct StatusBar: View {
     }
 }
 
-private struct ConnectingOverlay: View {
+struct ConnectingOverlay: View {
     @EnvironmentObject var wb: Workbench
     var body: some View {
         let t = wb.theme
@@ -460,8 +471,8 @@ struct QuickPickList<Item: Identifiable>: View {
             TextField(placeholder, text: $query)
                 .textFieldStyle(.plain).font(.system(size: 13))
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
-                .padding(6).background(t.inputBg).foregroundStyle(t.inputFg)
-                .overlay(RoundedRectangle(cornerRadius: 2).stroke(t.focusBorder))
+                .padding(6).background(t.inputBg, in: RoundedRectangle(cornerRadius: 4)).foregroundStyle(t.inputFg)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(t.focusBorder))
                 .padding(6)
                 .focused($focused)
                 .onSubmit { if let i = items.indices.contains(selection) ? items[selection] : items.first { pick(i) } }
@@ -474,24 +485,25 @@ struct QuickPickList<Item: Identifiable>: View {
                     LazyVStack(spacing: 0) {
                         ForEach(Array(items.prefix(200).enumerated()), id: \.element.id) { i, item in
                             row(item)
-                                .padding(.horizontal, 10).frame(height: 22).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(i == selection ? t.listActiveBg : .clear)
-                                .hoverBackground(i == selection ? .clear : t.listHoverBg)
+                                .padding(.horizontal, 8).frame(height: 24).frame(maxWidth: .infinity, alignment: .leading)
+                                .background { if i == selection { RoundedRectangle(cornerRadius: 4).fill(t.listActiveBg) } }
+                                .hoverBackground(i == selection ? .clear : t.listHoverBg, cornerRadius: 4)
                                 .foregroundStyle(i == selection ? t.listActiveFg : t.quickInputFg)
                                 .contentShape(Rectangle())
                                 .onTapGesture { pick(item) }
                                 .id(i)
                         }
                     }
+                    .padding(.horizontal, 6).padding(.bottom, items.isEmpty ? 0 : 6)
                 }
                 .onChange(of: selection) { proxy.scrollTo(selection) }
             }
-            .frame(height: min(CGFloat(min(items.count, 200)) * 22, 400)) // fits its rows, like VS Code
+            .frame(height: min(CGFloat(min(items.count, 200)) * 24 + (items.isEmpty ? 0 : 6), 420)) // fits its rows, like VS Code
         }
         .frame(width: 600)
-        .background(t.quickInputBg)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .shadow(color: t.widgetShadow, radius: 8)
+        .floatingSurface(t.quickInputBg, cornerRadius: 8)
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(t.widgetBorder))
+        .shadow(color: t.widgetShadow, radius: 16, y: 6)
         // Centered in the window, just under the title bar, like VS Code;
         // tapping anywhere else dismisses.
         .padding(.top, 40)
@@ -518,7 +530,7 @@ private struct QuickOpen: View {
             let name = (item.path as NSString).lastPathComponent
             return AnyView(HStack(spacing: 6) {
                 FileIcon(name: name, size: 14)
-                Text(name).font(.system(size: 13))
+                Text(Self.marked(name, query, wb.theme)).font(.system(size: 13))
                 Text((item.path as NSString).deletingLastPathComponent).font(.system(size: 12))
                     .foregroundStyle(wb.theme.descriptionFg).lineLimit(1)
             })
@@ -557,6 +569,32 @@ private struct QuickOpen: View {
         return scored.prefix(200).map { PathItem(path: $0.path) }
     }
 
+    /// `name` with the query's letters bold in list.highlightForeground: the
+    /// contiguous match if there is one, else the first subsequence.
+    static func marked(_ name: String, _ query: String, _ t: VSTheme) -> AttributedString {
+        var a = AttributedString(name)
+        let q = Array(query.lowercased().replacingOccurrences(of: " ", with: ""))
+        guard !q.isEmpty else { return a }
+        let chars = Array(name.lowercased())
+        guard chars.count == name.count else { return a } // case folding changed the length
+        var hits: [Int] = []
+        if let r = name.lowercased().range(of: String(q)) {
+            let s = name.lowercased().distance(from: name.lowercased().startIndex, to: r.lowerBound)
+            hits = Array(s ..< s + q.count)
+        } else {
+            var j = 0
+            for (i, c) in chars.enumerated() where j < q.count && c == q[j] { hits.append(i); j += 1 }
+            if j < q.count { return a }
+        }
+        for i in hits {
+            let lo = a.index(a.startIndex, offsetByCharacters: i)
+            let hi = a.index(lo, offsetByCharacters: 1)
+            a[lo..<hi].foregroundColor = t.highlightFg
+            a[lo..<hi].font = .system(size: 13, weight: .semibold)
+        }
+        return a
+    }
+
     private func isSubsequence(_ q: String, of s: String) -> Bool {
         var it = s.makeIterator()
         return q.allSatisfy { c in
@@ -575,12 +613,16 @@ struct Command: Identifiable {
     static let all: [Command] = [
         Command(title: "File: Save", keys: "⌘S") { wb in Task { await wb.save() } },
         Command(title: "Go to File…", keys: "⌘P") { $0.quickOpen = true },
-        Command(title: "View: Toggle Primary Side Bar Visibility", keys: "⌘B") { $0.side = $0.side == nil ? .explorer : nil },
+        Command(title: "View: Toggle Primary Side Bar Visibility", keys: "⌘B") { $0.toggleSidebar() },
         Command(title: "View: Toggle Panel Visibility", keys: "⌘J") { $0.togglePanel() },
         Command(title: "View: Show Explorer", keys: "⇧⌘E") { $0.side = .explorer },
         Command(title: "Search: Find in Files", keys: "⇧⌘F") { $0.side = .search },
         Command(title: "Terminal: Create New Terminal", keys: "⌃⇧`") { $0.newTerminal() },
         Command(title: "Terminal: Toggle Terminal", keys: "⌃`") { $0.toggleTerminal() },
+        Command(title: "Terminal: Create New Terminal Window", keys: "") { $0.openTerminalWindow() },
+        Command(title: "Terminal: Move Terminal into New Window", keys: "") { wb in
+            if let id = wb.activeTerminal { wb.moveTerminalToNewWindow(id) }
+        },
         Command(title: "Terminal: Focus Terminal", keys: "") { wb in
             wb.panelOpen = true
             wb.panelTab = .terminal
@@ -640,23 +682,57 @@ private struct CommandPalette: View {
     @EnvironmentObject var wb: Workbench
     @State private var query = ""
     var body: some View {
+        let recent = Self.recent
         QuickPickList(placeholder: "Type the name of a command to run.", query: $query, items: matches, row: { c in
-            AnyView(HStack {
-                Text(c.title).font(.system(size: 13))
+            AnyView(HStack(spacing: 8) {
+                Text(highlighted(c.title)).font(.system(size: 13)).lineLimit(1)
                 Spacer()
-                Text(c.keys).font(.system(size: 12)).foregroundStyle(wb.theme.descriptionFg)
+                if query.isEmpty, c.title == recent.first {
+                    Text("recently used").font(.system(size: 12)).foregroundStyle(wb.theme.descriptionFg)
+                }
+                KeyChips(keys: c.keys, theme: wb.theme)
             })
         }, pick: { c in
             wb.palette = false
+            Self.recent = [c.title] + recent.filter { $0 != c.title }.prefix(4)
             c.run(wb)
         }, dismiss: { wb.palette = false })
     }
 
+    /// Titles of the last commands run, newest first (VS Code's "recently used").
+    static var recent: [String] {
+        get { UserDefaults.standard.stringArray(forKey: "palette.recent") ?? [] }
+        set { UserDefaults.standard.set(newValue, forKey: "palette.recent") }
+    }
+
+    private var words: [Substring] {
+        query.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "> ")).split(separator: " ")
+    }
+
     private var matches: [Command] {
-        let q = query.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "> "))
-        guard !q.isEmpty else { return Command.all }
-        let words = q.split(separator: " ")
+        guard !words.isEmpty else {
+            let recent = Self.recent
+            let first = recent.compactMap { r in Command.all.first { $0.title == r } }
+            return first + Command.all.filter { !recent.contains($0.title) }
+        }
         return Command.all.filter { c in words.allSatisfy { c.title.lowercased().contains($0) } }
+    }
+
+    /// The query's words in the title in list.highlightForeground, bold.
+    private func highlighted(_ title: String) -> AttributedString {
+        var a = AttributedString(title)
+        let lower = title.lowercased()
+        for w in words {
+            var from = lower.startIndex
+            while let r = lower.range(of: w, range: from..<lower.endIndex) {
+                if let ar = Range(NSRange(r, in: lower), in: a) {
+                    a[ar].foregroundColor = wb.theme.highlightFg
+                    a[ar].font = .system(size: 13, weight: .semibold)
+                }
+                from = r.upperBound
+            }
+        }
+        return a
     }
 }
 
@@ -684,4 +760,38 @@ private struct KeyCommands: View {
         Button(title, action: action).keyboardShortcut(KeyEquivalent(k), modifiers: mods)
     }
 
+}
+
+/// Keyboard shortcut as VS Code draws it: one chip per key ("⇧⌘P" → ⇧ ⌘ P),
+/// chords separated by a space.
+struct KeyChips: View {
+    let keys: String
+    let theme: VSTheme
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(Array(keys.split(separator: " ").enumerated()), id: \.offset) { _, chord in
+                HStack(spacing: 2) {
+                    ForEach(Array(Self.split(chord).enumerated()), id: \.offset) { _, k in
+                        Text(k).font(.system(size: 11))
+                            .padding(.horizontal, 4).frame(minWidth: 18, minHeight: 17)
+                            .foregroundStyle(theme.ui("keybindingLabel.foreground", "foreground", default: "#cccccc"))
+                            .background(theme.ui("keybindingLabel.background", default: "#8080802b"), in: RoundedRectangle(cornerRadius: 3))
+                            .overlay(alignment: .bottom) {
+                                RoundedRectangle(cornerRadius: 3).stroke(theme.ui("keybindingLabel.bottomBorder", "keybindingLabel.border", default: "#44444499"))
+                            }
+                    }
+                }
+            }
+        }
+    }
+
+    /// "⇧⌘F12" → ["⇧", "⌘", "F12"]: each modifier glyph, then the key.
+    static func split(_ chord: Substring) -> [String] {
+        var out: [String] = []
+        var rest = Substring(chord)
+        while let c = rest.first, "⌘⇧⌥⌃".contains(c) { out.append(String(c)); rest = rest.dropFirst() }
+        if !rest.isEmpty { out.append(String(rest)) }
+        return out
+    }
 }

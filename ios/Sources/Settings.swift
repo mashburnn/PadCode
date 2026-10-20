@@ -23,6 +23,7 @@ final class AppSettings: ObservableObject {
     @Published var insertFinalNewline: Bool { didSet { d.set(insertFinalNewline, forKey: "insertFinalNewline") } }
     @Published var autoSuggest: Bool { didSet { d.set(autoSuggest, forKey: "autoSuggest") } }
     @Published var terminalFontSize: Double? { didSet { d.set(terminalFontSize, forKey: "terminalFontSize") } }
+    @Published var minimap: Bool { didSet { d.set(minimap, forKey: "minimap") } }
 
     private init() {
         themeChoice = d.string(forKey: "theme") ?? Self.desktopTheme
@@ -37,6 +38,7 @@ final class AppSettings: ObservableObject {
         insertFinalNewline = d.bool(forKey: "insertFinalNewline")
         autoSuggest = d.object(forKey: "autoSuggest") as? Bool ?? true
         terminalFontSize = d.object(forKey: "terminalFontSize") as? Double
+        minimap = d.object(forKey: "minimap") as? Bool ?? true
     }
 
     /// Bundled themes: (file, display name).
@@ -96,6 +98,7 @@ struct SettingsView: View {
                     Toggle("Word Wrap", isOn: $settings.wordWrap)
                     Toggle("Render Whitespace", isOn: $settings.showInvisibles)
                     Toggle("Suggestions While Typing", isOn: $settings.autoSuggest)
+                    Toggle("Minimap", isOn: $settings.minimap)
                 }
                 Section {
                     Toggle("Auto Save", isOn: $settings.autoSave)
@@ -172,6 +175,7 @@ struct SettingsView: View {
         settings.trimTrailingWhitespace = false
         settings.insertFinalNewline = false
         settings.autoSuggest = true
+        settings.minimap = true
         Task { await wb.syncSettings() }
     }
 }

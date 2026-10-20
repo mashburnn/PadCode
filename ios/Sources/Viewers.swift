@@ -209,29 +209,51 @@ struct ShareSheet: UIViewControllerRepresentable {
 }
 
 /// Upload/download progress and results, bottom of the window.
+/// VS Code's notification toasts, bottom right: transfers in progress, short
+/// confirmations, and errors (which stay until closed or 10 s pass).
 struct TransferToast: View {
     @ObservedObject var wb: Workbench
     var body: some View {
         let t = wb.theme
-        Group {
+        VStack(alignment: .trailing, spacing: 8) {
+            if let msg = wb.alert {
+                toast(t, msg, icon: .error, color: t.ui("notificationsErrorIcon.foreground", "editorError.foreground", default: "#f14c4c"),
+                      close: { wb.alert = nil })
+                    .task(id: msg) {
+                        guard (try? await Task.sleep(for: .seconds(10))) != nil else { return }
+                        if wb.alert == msg { wb.alert = nil }
+                    }
+            }
             if let msg = wb.transfer ?? wb.toast {
-                HStack(spacing: 8) {
-                    if wb.transfer != nil { ProgressView().scaleEffect(0.7) } else { CodiconView(icon: .check, size: 14) }
-                    Text(msg).font(.system(size: 13))
-                }
-                .padding(.horizontal, 14).padding(.vertical, 8)
-                .foregroundStyle(t.ui("notifications.foreground", "editor.foreground", default: "#cccccc"))
-                .background(t.ui("notifications.background", "editorWidget.background", default: "#252526"))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .shadow(color: t.widgetShadow, radius: 6)
-                .padding(.bottom, 40)
-                .task(id: wb.toast) {
-                    guard wb.toast != nil else { return }
-                    try? await Task.sleep(for: .seconds(3))
-                    wb.toast = nil
-                }
+                toast(t, msg, icon: wb.transfer != nil ? nil : .check, color: t.ui("notificationsInfoIcon.foreground", default: "#3794ff"),
+                      close: wb.transfer != nil ? nil : { wb.toast = nil })
+                    .task(id: wb.toast) {
+                        // A newer toast cancels this wait; it mustn't clear that one.
+                        guard wb.toast != nil, (try? await Task.sleep(for: .seconds(3))) != nil else { return }
+                        wb.toast = nil
+                    }
             }
         }
-        .animation(.easeOut(duration: 0.2), value: wb.transfer ?? wb.toast)
+        .padding(.trailing, 12).padding(.bottom, 34)
+        .animation(.snappy(duration: 0.22), value: wb.transfer ?? wb.toast)
+        .animation(.snappy(duration: 0.22), value: wb.alert)
+    }
+
+    private func toast(_ t: VSTheme, _ msg: String, icon: Codicon?, color: Color, close: (() -> Void)?) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            if let icon { CodiconView(icon: icon, size: 16).foregroundStyle(color) } else { ProgressView().scaleEffect(0.7).frame(width: 16, height: 16) }
+            Text(msg).font(.system(size: 13)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            if let close {
+                Button(action: close) { CodiconView(icon: .close, size: 14) }
+                    .buttonStyle(ToolbarButtonStyle(padding: 2)).tip("Clear Notification")
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .frame(width: 400)
+        .foregroundStyle(t.ui("notifications.foreground", "editor.foreground", default: "#cccccc"))
+        .floatingSurface(t.ui("notifications.background", "editorWidget.background", default: "#252526"), cornerRadius: 6)
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(t.ui("notifications.border", "notificationToast.border", "widget.border", default: "#ffffff14")))
+        .shadow(color: t.widgetShadow, radius: 10, y: 4)
+        .transition(.move(edge: .trailing).combined(with: .opacity))
     }
 }

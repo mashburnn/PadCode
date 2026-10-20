@@ -66,6 +66,16 @@ final class LineFragmentController {
         }
     }
 
+    var indentGuides: IndentGuides? { // padcode
+        get { renderer.indentGuides }
+        set {
+            if newValue != renderer.indentGuides {
+                renderer.indentGuides = newValue
+                lineFragmentView?.setNeedsDisplay()
+            }
+        }
+    }
+
     private let renderer: LineFragmentRenderer
 
     init(lineFragment: LineFragment, invisibleCharacterConfiguration: InvisibleCharacterConfiguration) {

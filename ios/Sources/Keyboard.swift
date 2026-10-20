@@ -67,7 +67,7 @@ extension View {
 }
 
 /// Reports the UIWindow a SwiftUI view lives in.
-private struct WindowProbe: UIViewRepresentable {
+struct WindowProbe: UIViewRepresentable {
     let found: (UIWindow?) -> Void
 
     func makeUIView(context: Context) -> Probe {

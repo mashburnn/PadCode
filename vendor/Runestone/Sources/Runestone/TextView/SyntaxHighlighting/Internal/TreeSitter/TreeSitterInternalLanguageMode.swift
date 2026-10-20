@@ -78,6 +78,8 @@ final class TreeSitterInternalLanguageMode: InternalLanguageMode {
         rootLanguageLayer.captures(in: range)
     }
 
+    var tree: TreeSitterTree? { rootLanguageLayer.tree } // padcode
+
     func createLineSyntaxHighlighter() -> LineSyntaxHighlighter {
         TreeSitterSyntaxHighlighter(stringView: stringView, languageMode: self, operationQueue: operationQueue)
     }

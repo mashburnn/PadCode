@@ -154,6 +154,31 @@ enum LineEdit {
     }
 }
 
+/// The other whole-word uses of the identifier at the caret.
+enum Occurrences {
+    // ponytail: textual, so it also matches in comments and strings; LSP
+    // documentHighlight would be exact if that ever misleads.
+    static func find(in s: NSString, caret: Int, limit: Int = 300) -> [NSRange] {
+        func isWord(_ c: unichar) -> Bool { (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 || c == 36 }
+        var a = caret, b = caret
+        while a > 0, isWord(s.character(at: a - 1)) { a -= 1 }
+        while b < s.length, isWord(s.character(at: b)) { b += 1 }
+        let word = NSRange(location: a, length: b - a)
+        guard word.length >= 2, word.length <= 64, !(48...57).contains(s.character(at: a)) else { return [] }
+        let needle = s.substring(with: word)
+        var found: [NSRange] = [], from = 0
+        while found.count < limit {
+            let r = s.range(of: needle, options: .literal, range: NSRange(location: from, length: s.length - from))
+            guard r.location != NSNotFound else { break }
+            let before = r.location == 0 || !isWord(s.character(at: r.location - 1))
+            let after = NSMaxRange(r) == s.length || !isWord(s.character(at: NSMaxRange(r)))
+            if before && after { found.append(r) }
+            from = NSMaxRange(r)
+        }
+        return found.count > 1 ? found : [] // a word used once has nothing to show
+    }
+}
+
 /// VS Code's matching-bracket highlight: the bracket touching the caret
 /// (before it first) and its partner, by depth counting.
 enum Brackets {

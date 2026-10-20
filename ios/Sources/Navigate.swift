@@ -45,7 +45,8 @@ final class OutlineModel: ObservableObject {
                 return
             }
             if wb.languages.languageId(for: f.path) == nil || wb.languages.missing[Language.id(for: f.path) ?? ""] != nil { break }
-            try? await Task.sleep(for: .milliseconds(300 * (attempt + 1)))
+            // Cancelled (the next keystroke restarts this): stop, don't fire the remaining tries at once.
+            guard (try? await Task.sleep(for: .milliseconds(300 * (attempt + 1)))) != nil else { return }
         }
         symbols = []
         message = "No outline: \(f.name) has no language server on \(wb.machine.name)."
@@ -93,7 +94,7 @@ struct OutlineView: View {
         }
         .task(id: "\(wb.active ?? "")#\(wb.activeFile?.revision ?? 0)#\(status.edits)") {
             // Debounce: refresh after edits settle.
-            try? await Task.sleep(for: .milliseconds(model.symbols.isEmpty ? 0 : 700))
+            guard (try? await Task.sleep(for: .milliseconds(model.symbols.isEmpty ? 0 : 700))) != nil else { return }
             await model.load(wb)
         }
     }

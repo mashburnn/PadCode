@@ -62,6 +62,12 @@ public protocol Theme: AnyObject {
     /// - Returns: The object used for highlighting the provided text range, or `nil` if the range should not be highlighted.
     @available(iOS 16, *)
     func highlightedRange(forFoundTextRange foundTextRange: NSRange, ofStyle style: UITextSearchFoundTextStyle) -> HighlightedRange?
+    /// padcode: colors for (), [] and {} by nesting depth, cycled. Empty turns it off.
+    var bracketPairColors: [UIColor] { get }
+    /// padcode: color of the indent guides, or nil for none.
+    var indentGuideColor: UIColor? { get }
+    /// padcode: color of the guide of the block holding the caret.
+    var activeIndentGuideColor: UIColor? { get }
 }
 
 public extension Theme {
@@ -76,6 +82,10 @@ public extension Theme {
     var markedTextBackgroundCornerRadius: CGFloat {
         0
     }
+
+    var bracketPairColors: [UIColor] { [] } // padcode
+    var indentGuideColor: UIColor? { nil } // padcode
+    var activeIndentGuideColor: UIColor? { nil } // padcode
 
     func font(for highlightName: String) -> UIFont? {
         nil

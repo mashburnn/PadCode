@@ -5,6 +5,15 @@ protocol LineFragmentRendererDelegate: AnyObject {
     func string(in lineFragmentRenderer: LineFragmentRenderer) -> String?
 }
 
+// padcode: vertical lines at each indent level (VS Code's editor.guides.indentation).
+struct IndentGuides: Equatable {
+    let count: Int
+    let step: CGFloat
+    let color: UIColor
+    let active: Int?
+    let activeColor: UIColor
+}
+
 final class LineFragmentRenderer {
     private enum HorizontalPosition {
         case character(Int)
@@ -18,6 +27,7 @@ final class LineFragmentRenderer {
     var markedTextBackgroundColor: UIColor = .systemFill
     var markedTextBackgroundCornerRadius: CGFloat = 0
     var highlightedRangeFragments: [HighlightedRangeFragment] = []
+    var indentGuides: IndentGuides? // padcode
 
     private var showInvisibleCharacters: Bool {
         invisibleCharacterConfiguration.showTabs
@@ -33,6 +43,12 @@ final class LineFragmentRenderer {
 
     func draw(to context: CGContext, inCanvasOfSize canvasSize: CGSize) {
         drawHighlightedRanges(to: context, inCanvasOfSize: canvasSize)
+        if let g = indentGuides { // padcode
+            for k in 0 ..< g.count {
+                context.setFillColor((k == g.active ? g.activeColor : g.color).cgColor)
+                context.fill(CGRect(x: (CGFloat(k) * g.step).rounded(), y: 0, width: 1, height: canvasSize.height))
+            }
+        }
         drawMarkedRange(to: context)
         drawInvisibleCharacters()
         drawText(to: context)
@@ -54,6 +70,15 @@ private extension LineFragmentRenderer {
                 endX = CTLineGetOffsetForStringIndex(lineFragment.line, highlightedRange.range.upperBound, nil)
             }
             let rect = CGRect(x: startX, y: 0, width: endX - startX, height: lineFragment.scaledSize.height)
+            if highlightedRange.cornerRadius <= -2 { // padcode: -2 asks for a plain underline
+                context.setFillColor(highlightedRange.color.cgColor)
+                context.fill(CGRect(x: rect.minX, y: rect.maxY - 2, width: rect.width, height: 1))
+                continue
+            }
+            if highlightedRange.cornerRadius < 0 { // padcode: a negative radius asks for a squiggly underline
+                drawSquiggle(under: rect, color: highlightedRange.color, to: context)
+                continue
+            }
             let roundedCorners = highlightedRange.roundedCorners
             context.setFillColor(highlightedRange.color.cgColor)
             if !roundedCorners.isEmpty && highlightedRange.cornerRadius > 0 {
@@ -66,6 +91,25 @@ private extension LineFragmentRenderer {
             }
         }
         context.restoreGState()
+    }
+
+    // padcode: VS Code's error and warning squiggles.
+    private func drawSquiggle(under rect: CGRect, color: UIColor, to context: CGContext) {
+        let wave: CGFloat = 2, step: CGFloat = 3
+        let y = rect.maxY - wave - 1
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: rect.minX, y: y + wave))
+        var x = rect.minX
+        var up = true
+        while x < max(rect.maxX, rect.minX + 2 * step) {
+            x += step
+            path.addLine(to: CGPoint(x: x, y: up ? y : y + wave))
+            up.toggle()
+        }
+        context.setStrokeColor(color.cgColor)
+        context.setLineWidth(1)
+        context.addPath(path)
+        context.strokePath()
     }
 
     private func drawMarkedRange(to context: CGContext) {

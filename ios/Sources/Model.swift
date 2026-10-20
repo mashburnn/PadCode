@@ -261,10 +261,135 @@ final class Workbench: ObservableObject {
     private var forwardStack: [Spot] = []
     private var closedStack: [String] = []
 
-    init(machine: MachineInfo, folder: String? = nil) {
+    /// A terminal window: only these desktop shells (persistent session IDs;
+    /// empty starts one), no editor, Explorer or language servers.
+    let terminalsOnly: [String]?
+    /// A terminal window's scene and SwiftUI's dismiss for it, so it closes
+    /// once its last terminal goes.
+    weak var scene: UIWindowScene?
+    var dismissWindow: (() -> Void)?
+
+    /// Closing a terminal window's last terminal closes the window. On screen,
+    /// SwiftUI's dismiss (requestSceneSessionDestruction's close animation made
+    /// the iPadOS 27 Simulator's backboardd crash); in the background, where
+    /// SwiftUI doesn't act, the scene session is destroyed directly.
+    private func closeIfEmptyTerminalWindow() {
+        guard terminalsOnly != nil, terminals.isEmpty else { return }
+        // Land back in the editor, not on the home screen: once this window's
+        // close is under way (a window that's no longer in front doesn't close).
+        let editor = editorWindow
+        defer {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(350))
+                editor?.bringToFront()
+            }
+        }
+        if let scene, scene.activationState == .background || scene.activationState == .unattached {
+            let quiet = UIWindowSceneDestructionRequestOptions()
+            quiet.windowDismissalAnimation = .decline // nothing on screen to animate
+            UIApplication.shared.requestSceneSessionDestruction(scene.session, options: quiet)
+        } else {
+            dismissWindow?()
+        }
+    }
+    /// Every live workbench, for finding a new window's (tests).
+    static var live: [WeakWorkbench] = []
+
+    init(machine: MachineInfo, folder: String? = nil, terminals: [String]? = nil) {
         self.machine = machine
         initialFolder = folder
+        terminalsOnly = terminals
         languages.wb = self
+        Self.live = Self.live.filter { $0.wb != nil } + [WeakWorkbench(wb: self)]
+        if terminals != nil { adoptFromOpenWindow() }
+    }
+
+    /// Live terminals moving between this app's windows, by session ID: the
+    /// new window takes the running view and stream as they are (no reconnect,
+    /// no replay, no reflow), so the move is instant.
+    static var handoff: [String: TerminalSession] = [:]
+
+    /// A terminal window opened from another window on the same desktop shares
+    /// its connection and look, so it's ready at once instead of connecting.
+    private func adoptFromOpenWindow() {
+        guard let ids = terminalsOnly,
+              let source = Self.live.compactMap(\.wb).first(where: { $0 !== self && $0.machine.id == machine.id && $0.desktop != nil })
+        else { return } // e.g. restored after a relaunch: connect() reattaches by ID
+        desktop = source.desktop
+        env = source.env
+        theme = source.theme
+        fontSize = source.fontSize
+        tabSize = source.tabSize
+        status = machine.name
+        everConnected = true
+        root = initialFolder ?? ""
+        panelOpen = true
+        panelTab = .terminal
+        if ids.isEmpty { newTerminal() }
+        for id in ids {
+            if let live = Self.handoff.removeValue(forKey: id) { adopt(live, focus: id == ids.last) }
+            else { newTerminal(persistentID: id, focus: id == ids.last) }
+        }
+    }
+
+    /// The next or previous terminal tab, wrapping around.
+    func cycleTerminal(_ step: Int) {
+        guard !terminals.isEmpty else { return }
+        let i = terminals.firstIndex { $0.id == activeTerminal } ?? 0
+        focusTerminal(terminals[(i + step + terminals.count) % terminals.count].id)
+    }
+
+    /// Takes a running terminal from another window of this app.
+    func adopt(_ t: TerminalSession, focus: Bool) {
+        panelTab = .terminal
+        terminals.append(t)
+        activeTerminal = t.id
+        panelOpen = true
+        t.workbench = self
+        if focus { focusTerminal() }
+    }
+
+    /// Removes a terminal from this window without stopping it (it's moving).
+    private func release(terminal id: UUID) -> TerminalSession? {
+        guard let i = terminals.firstIndex(where: { $0.id == id }) else { return nil }
+        let t = terminals.remove(at: i)
+        if activeTerminal == id { activeTerminal = (terminals.indices.contains(i) ? terminals[i] : terminals.last)?.id }
+        return t
+    }
+
+    /// Terminal: Move Terminal into New Window. The shell keeps running on the
+    /// desktop; the new window reattaches it by session ID.
+    func moveTerminalToNewWindow(_ id: UUID) {
+        // The live session moves, so this works on Windows desktops too.
+        guard let t = release(terminal: id) else { return }
+        Self.handoff[t.persistentID] = t
+        if terminals.isEmpty && panelTab == .terminal && terminalsOnly == nil { panelOpen = false }
+        openWindowAction?(id: "terminals", value: TerminalWindowTarget(machine: machine, folder: root.isEmpty ? nil : root, terminals: [t.persistentID]))
+        closeIfEmptyTerminalWindow()
+    }
+
+    /// The editor window on the same desktop, if one is open (for moving back).
+    var editorWindow: Workbench? {
+        Workbench.live.compactMap(\.wb).first { $0 !== self && $0.terminalsOnly == nil && $0.machine.id == machine.id && $0.desktop != nil }
+    }
+
+    /// Hands a terminal back to the editor window's panel; the shell keeps running.
+    func moveTerminalToEditorWindow(_ id: UUID) {
+        guard let target = editorWindow, let t = release(terminal: id) else { return }
+        target.adopt(t, focus: true)
+        closeIfEmptyTerminalWindow() // and if this window stays, show the editor anyway
+        if !terminals.isEmpty { target.bringToFront() }
+    }
+
+    /// Asks iPadOS to show this window (e.g. after a terminal moved into it).
+    func bringToFront() {
+        guard let session = scene?.session, scene?.activationState != .foregroundActive else { return }
+        UIApplication.shared.activateSceneSession(for: UISceneSessionActivationRequest(session: session))
+    }
+
+    /// Terminal: Create New Terminal Window.
+    func openTerminalWindow() {
+        openWindowAction?(id: "terminals", value: TerminalWindowTarget(machine: machine, folder: root.isEmpty ? nil : root))
     }
 
     /// The focused group's visible document.
@@ -281,12 +406,13 @@ final class Workbench: ObservableObject {
     func focus(_ path: String?, in g: Int) {
         guard groups.indices.contains(g) else { return }
         if let f = file(path) {
-            editorStatus.line = f.cursor.line
-            editorStatus.column = f.cursor.column
+            if editorStatus.line != f.cursor.line { editorStatus.line = f.cursor.line }
+            if editorStatus.column != f.cursor.column { editorStatus.column = f.cursor.column }
         }
+        // Setting a @Published value redraws its watchers even when unchanged.
         if let path, !groups[g].tabs.contains(path) { groups[g].tabs.append(path) }
-        groups[g].active = path
-        focusedGroup = g
+        if groups[g].active != path { groups[g].active = path }
+        if focusedGroup != g { focusedGroup = g }
     }
 
     // MARK: Split editor
@@ -362,8 +488,17 @@ final class Workbench: ObservableObject {
             env = e
             Account.shared.remember(os: e.os, for: machine.id)
             status = machine.name
+            let first = !everConnected
             everConnected = true
-            if root.isEmpty {
+            if let ids = terminalsOnly {
+                // No folder session or language servers here: just the shells.
+                if first {
+                    root = initialFolder ?? ""
+                    panelOpen = true
+                    panelTab = .terminal
+                    if ids.isEmpty { newTerminal() } else { for id in ids { newTerminal(persistentID: id, focus: id == ids.last) } }
+                }
+            } else if root.isEmpty {
                 if let f = initialFolder { openFolder(f) } else { picker = true }
             }
             await syncSettings()
@@ -704,6 +839,7 @@ final class Workbench: ObservableObject {
     }
 
     func saveSession() {
+        guard terminalsOnly == nil else { return } // the folder's session belongs to its main window
         guard let url = sessionURL, restoredSession else { return }
         let real = { (p: String) in self.file(p).map { $0.viewer != .markdownPreview && $0.viewer != .browser } ?? false }
         let s = SavedSession(
@@ -1053,6 +1189,7 @@ final class Workbench: ObservableObject {
         if activeTerminal == id { activeTerminal = (terminals.indices.contains(i) ? terminals[i] : terminals.last)?.id }
         if terminals.isEmpty && panelTab == .terminal { panelOpen = false }
         if hadFocus { terminals.isEmpty ? focusEditor() : focusTerminal() }
+        closeIfEmptyTerminalWindow()
     }
 
     // MARK: keyboard focus between editor and terminal
@@ -1060,11 +1197,19 @@ final class Workbench: ObservableObject {
     /// The shown terminal has the keyboard.
     var terminalFocused: Bool { terminals.first { $0.id == activeTerminal }?.view.isFirstResponder ?? false }
 
+    /// Showing and hiding parts of the window slides them, briefly.
+    static let layoutAnimation = Animation.snappy(duration: 0.22)
+
+    /// ⌘B: the sidebar slides in and out.
+    func toggleSidebar(_ view: SideView = .explorer) {
+        withAnimation(Self.layoutAnimation) { side = side == nil ? view : nil }
+    }
+
     /// ⌃`: show the terminal and type into it; from the terminal, hide it and
     /// go back to the editor.
     func toggleTerminal() {
         if panelOpen && panelTab == .terminal && terminalFocused { return hidePanel() }
-        panelOpen = true
+        withAnimation(Self.layoutAnimation) { panelOpen = true }
         panelTab = .terminal
         if terminals.isEmpty { newTerminal() } else { focusTerminal() }
     }
@@ -1072,18 +1217,19 @@ final class Workbench: ObservableObject {
     /// ⌘J, as in VS Code: opening the panel puts the keyboard in it.
     func togglePanel() {
         if panelOpen { return hidePanel() }
-        panelOpen = true
+        withAnimation(Self.layoutAnimation) { panelOpen = true }
         if panelTab == .terminal { terminals.isEmpty ? newTerminal() : focusTerminal() }
     }
 
     func hidePanel() {
         let hadFocus = terminalFocused
-        panelOpen = false
+        withAnimation(Self.layoutAnimation) { panelOpen = false }
         if hadFocus { focusEditor() }
     }
 
     func focusTerminal(_ id: UUID? = nil) {
         if let id { activeTerminal = id }
+        terminals.first { $0.id == activeTerminal }?.unread = false
         guard let v = terminals.first(where: { $0.id == activeTerminal })?.view else { return }
         if v.window != nil { _ = v.becomeFirstResponder(); return }
         // Just opened: its view joins the window on the next layout pass.
@@ -1117,3 +1263,5 @@ final class Workbench: ObservableObject {
 func padcoreConnect(token: String, machine: MachineInfo) async throws -> Desktop {
     try await connect(token: token, machine: machine)
 }
+
+struct WeakWorkbench { weak var wb: Workbench? }

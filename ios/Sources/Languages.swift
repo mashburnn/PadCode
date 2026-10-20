@@ -19,6 +19,9 @@ final class Languages: ObservableObject {
     @Published var renameRequest: RenameRequest?
     @Published var references: [Reference]?
     @Published var codeActions: [Action]?
+    /// Last outline per document, for sticky scroll. Not published: every
+    /// view watching Languages would redraw on each outline refresh.
+    private(set) var outlines: [String: [DocSymbol]] = [:]
     var codeActionPath: String?
     @Published var signature: SignatureState?
 
@@ -183,8 +186,9 @@ final class Languages: ObservableObject {
             }
             let key = d.severity == 1 ? "editorError.foreground" : d.severity == 2 ? "editorWarning.foreground" : "editorInfo.foreground"
             let fallback = d.severity == 1 ? "#f14c4c" : d.severity == 2 ? "#cca700" : "#3794ff"
-            let color = theme.uiColor(key, default: fallback).withAlphaComponent(d.severity == 3 ? 0.18 : 0.3)
-            return HighlightedRange(id: "diag-\(i)-\(range.location)-\(range.length)-\(d.severity)", range: range, color: color, cornerRadius: 2)
+            // VS Code's squiggles, drawn by the vendored Runestone for a negative radius.
+            let color = theme.uiColor(key, default: fallback)
+            return HighlightedRange(id: "diag-\(i)-\(range.location)-\(range.length)-\(d.severity)", range: range, color: color, cornerRadius: -1)
         }
     }
 
@@ -360,7 +364,12 @@ final class Languages: ObservableObject {
     /// Outline for a document, or nil if no server/symbols.
     func symbols(_ path: String) async -> [DocSymbol]? {
         guard let s = docServer[path], s.canSymbols() else { return nil }
-        return try? await s.symbols(path: path)
+        let result = try? await s.symbols(path: path)
+        if let result, outlines[path] != result {
+            outlines[path] = result
+            if let wb { for c in wb.editors.values where c.path == path { c.sticky.update(symbols: result, theme: wb.theme) } }
+        }
+        return result
     }
 
     // MARK: hover & definition
@@ -423,7 +432,7 @@ final class Languages: ObservableObject {
     }
 
     /// The identifier under `offset`, or nil over whitespace and punctuation.
-    private func wordRange(at offset: Int, in tv: TextView) -> NSRange? {
+    func wordRange(at offset: Int, in tv: TextView) -> NSRange? {
         let ns = tv.text as NSString
         guard offset >= 0, offset < ns.length, isWordChar(ns.substring(with: NSRange(location: offset, length: 1))) else { return nil }
         let start = wordStart(ns, offset)
@@ -539,9 +548,9 @@ struct CompletionPopup: View {
                 }
                 .frame(width: 440, height: height)
                 .background(t.ui("editorSuggestWidget.background", "editorWidget.background", default: "#252526"))
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(t.ui("editorSuggestWidget.border", "editorWidget.border", default: "#454545")))
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-                .shadow(color: t.widgetShadow, radius: 6)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(t.ui("editorSuggestWidget.border", "editorWidget.border", default: "#454545")))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .shadow(color: t.widgetShadow, radius: 10, y: 4)
                 .offset(x: x, y: y)
             }
         }
@@ -613,8 +622,9 @@ struct HoverPopup: View {
                 let above = h.anchor.minY - origin.y > geo.size.height / 2
                 ScrollView {
                     VStack(alignment: .leading, spacing: 6) {
+                        let language = languages.activePath.flatMap { Language.treeSitter(for: wb.baseName($0)) }
                         ForEach(Array(blocks(h.text).enumerated()), id: \.offset) { _, b in
-                            Text(b.code ? AttributedString(b.text) : Self.markdown(b.text))
+                            Text(b.code ? Self.code(b.text, language, t) : Self.markdown(b.text))
                                 .font(b.code ? .custom("Menlo", size: 12) : .system(size: 13))
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -627,13 +637,22 @@ struct HoverPopup: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .foregroundStyle(t.ui("editorHoverWidget.foreground", "editor.foreground", default: "#cccccc"))
                 .background(t.ui("editorHoverWidget.background", "editorWidget.background", default: "#252526"))
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(t.ui("editorHoverWidget.border", default: "#454545")))
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-                .shadow(color: t.widgetShadow, radius: 6)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(t.ui("editorHoverWidget.border", default: "#454545")))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .shadow(color: t.widgetShadow, radius: 10, y: 4)
                 .offset(x: x, y: above ? max(h.anchor.minY - origin.y - 290, 4) : h.anchor.maxY - origin.y + 4)
                 .onTapGesture { languages.hover = nil }
+                .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: above ? .bottom : .top)))
             }
         }
+        .animation(.easeOut(duration: 0.12), value: languages.hover == nil)
+    }
+
+    /// A hover's code block in the editor's syntax colors (the file's language).
+    static func code(_ s: String, _ language: TreeSitterLanguage?, _ t: VSTheme) -> AttributedString {
+        guard let language, s.utf16.count < 20_000 else { return AttributedString(s) }
+        let ns = StringSyntaxHighlighter(theme: EditorTheme(t, fontSize: 12), language: language).syntaxHighlight(s)
+        return (try? AttributedString(ns, including: \.uiKit)) ?? AttributedString(s)
     }
 
     /// Inline markdown (bold, `code`, links); headings become bold lines.
@@ -745,28 +764,81 @@ final class PadTextView: TextView {
     var onDefinition: () -> Void = {}
     var onGotoLine: () -> Void = {}
     var onKey: (String) -> Void = { _ in }
+    var onScroll: () -> Void = {}
+    override var contentOffset: CGPoint {
+        didSet { if contentOffset != oldValue { onScroll() } }
+    }
     /// The open file's name, for its comment syntax.
     var fileName = ""
-    /// Diagnostic tints; the matching-bracket highlight is drawn on top.
+    /// Diagnostic tints; occurrence and matching-bracket highlights are drawn on top.
     var diagnosticRanges: [HighlightedRange] = [] {
-        didSet { if diagnosticRanges != oldValue { highlightedRanges = diagnosticRanges + bracketRanges } }
+        didSet { if diagnosticRanges != oldValue { applyHighlights() } }
     }
     private var bracketRanges: [HighlightedRange] = []
+    private var occurrenceRanges: [HighlightedRange] = []
     var bracketColor = UIColor.gray
+    var occurrenceColor = UIColor.gray.withAlphaComponent(0.3)
 
-    /// Highlights the bracket at the caret and its partner (looks ±20k characters).
+    /// The ⌘-hovered symbol, underlined like a link.
+    var linkRange: NSRange? {
+        didSet { if linkRange != oldValue { applyHighlights() } }
+    }
+    /// Letting go of ⌘ drops the link underline, even with the pointer still.
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        super.pressesEnded(presses, with: event)
+        if linkRange != nil, presses.contains(where: { $0.key?.keyCode == .keyboardLeftGUI || $0.key?.keyCode == .keyboardRightGUI }) {
+            linkRange = nil
+        }
+    }
+    var linkColor = UIColor.systemBlue
+    var selectionMatchColor = UIColor.systemBlue.withAlphaComponent(0.15)
+    var onHighlights: () -> Void = {}
+    private func applyHighlights() {
+        // A radius of -2 is the vendored Runestone's plain underline.
+        let link = linkRange.map { [HighlightedRange(id: "link-\($0.location)", range: $0, color: linkColor, cornerRadius: -2)] } ?? []
+        highlightedRanges = diagnosticRanges + occurrenceRanges + bracketRanges + link
+        onHighlights()
+    }
+
+    /// Highlights the bracket at the caret and its partner, and the other uses
+    /// of the word under the caret (VS Code's occurrencesHighlight). Looks ±20k
+    /// characters around the caret.
     func updateBracketMatch() {
-        var ranges: [HighlightedRange] = []
+        var brackets: [HighlightedRange] = [], words: [HighlightedRange] = []
         if selectedRange.length == 0 {
             let start = max(selectedRange.location - 20_000, 0)
             let window = NSRange(location: start, length: min(40_000, (text as NSString).length - start))
-            if let w = text(in: window), let (a, b) = Brackets.match(w as NSString, caret: selectedRange.location - start) {
-                ranges = [a, b].map { HighlightedRange(id: "bracket-\($0 + start)", range: NSRange(location: $0 + start, length: 1), color: bracketColor, cornerRadius: 2) }
+            if let w = text(in: window) {
+                let ns = w as NSString, caret = selectedRange.location - start
+                if let (a, b) = Brackets.match(ns, caret: caret) {
+                    brackets = [a, b].map { HighlightedRange(id: "bracket-\($0 + start)", range: NSRange(location: $0 + start, length: 1), color: bracketColor, cornerRadius: 2) }
+                }
+                words = Occurrences.find(in: ns, caret: caret).map {
+                    HighlightedRange(id: "word-\($0.location + start)", range: NSRange(location: $0.location + start, length: $0.length), color: occurrenceColor, cornerRadius: 2)
+                }
+            }
+        } else if selectedRange.length <= 200, let sel = text(in: selectedRange), !sel.contains("\n"),
+                  !sel.trimmingCharacters(in: .whitespaces).isEmpty {
+            // VS Code's selectionHighlight: the selected text's other copies nearby.
+            let start = max(selectedRange.location - 20_000, 0)
+            let window = NSRange(location: start, length: min(40_000, (text as NSString).length - start))
+            if let w = text(in: window) {
+                let ns = w as NSString
+                var from = 0
+                while words.count < 300 {
+                    let r = ns.range(of: sel, range: NSRange(location: from, length: ns.length - from))
+                    guard r.location != NSNotFound else { break }
+                    if r.location + start != selectedRange.location {
+                        words.append(HighlightedRange(id: "word-\(r.location + start)", range: NSRange(location: r.location + start, length: r.length), color: selectionMatchColor, cornerRadius: 2))
+                    }
+                    from = r.location + max(r.length, 1)
+                }
             }
         }
-        guard ranges != bracketRanges else { return }
-        bracketRanges = ranges
-        highlightedRanges = diagnosticRanges + bracketRanges
+        guard brackets != bracketRanges || words != occurrenceRanges else { return }
+        bracketRanges = brackets
+        occurrenceRanges = words
+        applyHighlights()
     }
     /// Called once the view has (re)gained width, e.g. to apply highlights.
     var onSized: () -> Void = {}
@@ -777,6 +849,9 @@ final class PadTextView: TextView {
     /// stayed cut off, so re-typeset the visible lines whenever it gets wider.
     override func layoutSubviews() {
         super.layoutSubviews()
+        // A kept editor is briefly zero-wide while it moves into its tab's new
+        // container; that's not a real narrowing, so it doesn't cost a redisplay.
+        guard bounds.width > 0 else { return }
         guard bounds.width > laidOutWidth + 0.5 else {
             laidOutWidth = min(laidOutWidth, bounds.width)
             return

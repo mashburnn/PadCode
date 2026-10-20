@@ -57,6 +57,11 @@ enum Scenario {
     }
 
     static func shot(_ name: String, wait: Double = 3) async {
+        #if targetEnvironment(simulator)
+        // The iPadOS 27 Simulator's backboardd can crash (Metal assert) if it's
+        // captured mid-animation, e.g. while a new window opens.
+        try? await Task.sleep(for: .seconds(1.5))
+        #endif
         log("SHOT \(name)")
         try? await Task.sleep(for: .seconds(wait))
     }
@@ -80,7 +85,8 @@ enum Scenario {
 
     static func wants(_ step: String) -> Bool {
         guard let r = requested else { return false }
-        return r == "all" || r.split(separator: ",").contains(Substring(step))
+        if r == "all" { return step != "switchloop" } // a profiling loop, only on request
+        return r.split(separator: ",").contains(Substring(step))
     }
 
     static func run(_ wb: Workbench) async {
@@ -134,6 +140,21 @@ enum Scenario {
         if wants("wheel") { await wheel(wb, d, root) }
         if wants("reattach-modes") { await reattachModes(wb, d, root) }
         if wants("focus") { await focus(wb, d, root, p("point.c")) }
+        if wants("terminal-window") { await terminalWindow(wb, d, root) }
+        if wants("anim") { await animations(wb, p("big.log")) }
+        if wants("visuals") { await visuals(wb, d, root) }
+        if wants("switchloop") {
+            // For a profiler: 40 s of tab switches.
+            let fs = ["big.log", "point.c", "messy.c", "src/main.rs", "README.md"].map(p)
+            for f in fs { await wb.open(f) }
+            try? await Task.sleep(for: .seconds(3))
+            log("switchloop: go")
+            let end = Date.now.addingTimeInterval(40)
+            while Date.now < end {
+                for f in fs { wb.focus(f, in: wb.focusedGroup); try? await Task.sleep(for: .milliseconds(150)) }
+            }
+            log("switchloop: done")
+        }
         if wants("termperf") { await termPerf(wb, d, root) }
         if wants("snappy") { await snappy(wb, d, root, ["big.log", "point.c", "messy.c", "src/main.rs", "README.md"].map(p)) }
         if wants("session-setup") { await sessionSetup(wb, d, p("point.c"), p("session-test.txt")) }
@@ -471,6 +492,11 @@ enum Scenario {
             return marks == [open - 1, close]
         }
         check("lines.bracket-match", marks == [open - 1, close], "\(marks.sorted()) want \([open - 1, close])")
+        // Caret in `point` (the struct name): its other use is highlighted too.
+        tv.selectedRange = NSRange(location: (tv.text as NSString).range(of: "point").location + 2, length: 0)
+        var words = 0
+        _ = await until(2) { words = tv.highlightedRanges.filter { $0.id.hasPrefix("word") }.count; return words == 2 }
+        check("lines.occurrences", words == 2, "\(words) highlighted, want 2 (struct point, struct point p)")
         wb.closeEverywhere(path)
     }
 
@@ -748,6 +774,12 @@ enum Scenario {
         wb.newTerminal(input: "for i in $(seq 1 300); do echo line-$i; done\r")
         guard let s = wb.terminals.last else { return check("pointer.terminal", false) }
         _ = await until(10) { s.view.contentSize.height > s.view.bounds.height * 3 }
+        // Until the output stops: more lines arriving would scroll it back down.
+        var last = -1.0
+        _ = await until(5, every: .milliseconds(300)) {
+            defer { last = s.view.contentSize.height }
+            return s.view.contentSize.height == last
+        }
         let v = s.view
         let bottom = v.contentOffset.y
         let pan = v.panGestureRecognizer
@@ -838,24 +870,32 @@ enum Scenario {
         for f in files { wb.closeEverywhere(f) }
         wb.learnSizes(in: root, files.filter { !$0.contains("/src/") }.map { Entry(name: ($0 as NSString).lastPathComponent, kind: .file) })
         try? await Task.sleep(for: .seconds(1))
-        var opens: [Double] = []
+        var opens: [Double] = [], colors: [Double] = []
         for f in files {
             let t0 = CACurrentMediaTime()
             await wb.open(f)
             if await until(5, every: .milliseconds(1), { wb.languages.activePath == f && wb.languages.activeView?.text.isEmpty == false }) {
                 opens.append((CACurrentMediaTime() - t0) * 1000)
             }
+            if await until(5, every: .milliseconds(1), { wb.editors["\(wb.focusedGroup):\(f)"]?.colored == true }) {
+                colors.append((CACurrentMediaTime() - t0) * 1000)
+            }
             try? await Task.sleep(for: .milliseconds(300))
         }
         report("open-file", opens, budget: pings.sorted()[4] * 2 + 60)
-        // Switching between open tabs.
+        report("open-file-colors", colors, budget: pings.sorted()[4] * 2 + 200)
+        // Switching between open tabs: until the first frame after the new tab
+        // is in the window, so work done before that frame's commit counts.
         var switches: [Double] = []
+        let clock = FrameClock()
+        defer { clock.stop() }
         for _ in 0..<2 {
             for f in files {
                 let t0 = CACurrentMediaTime()
                 wb.focus(f, in: wb.focusedGroup)
                 if await until(3, every: .milliseconds(1), { wb.languages.activePath == f && wb.languages.activeView?.window != nil }) {
                     wb.languages.activeView?.layoutIfNeeded()
+                    _ = await clock.next()
                     switches.append((CACurrentMediaTime() - t0) * 1000)
                 }
                 try? await Task.sleep(for: .milliseconds(150)) // a person's pace; the keyboard's follow-up work lands here
@@ -914,6 +954,159 @@ enum Scenario {
             wb.killTerminal(s.id)
         }
         try? await d.remove(path: script)
+    }
+
+    /// The sidebar and panel slide in and out without dropping frames, and the
+    /// terminal isn't resized frame by frame while the panel slides.
+    /// Editor visuals: bracket pair colors, indent guides, squiggles, sticky
+    /// scroll, overview ruler, breadcrumb symbols, palette chips, error toast.
+    static func visuals(_ wb: Workbench, _ d: Desktop, _ root: String) async {
+        let path = d.join(base: root, name: "visuals.c")
+        var src = "#include <stdio.h>\n\nstruct shape { int sides; int (*area)(int); };\n\n"
+        src += "static int square(int s) {\n    return s * s;\n}\n\n"
+        src += "int main(void) {\n    struct shape shapes[] = {{4, square}, {3, square}};\n"
+        src += "    for (int i = 0; i < 2; i++) {\n        if (shapes[i].sides > 3) {\n"
+        for i in 0..<40 { src += "            printf(\"%d (%s)\\n\", shapes[i].area(\(i)), \"[{}]\");\n" }
+        src += "        }\n    }\n    return undefined_name;\n}\n"
+        try? await d.writeFile(path: path, data: Data(src.utf8))
+        guard let tv = await open(wb, path) as? PadTextView else { return check("visuals.open", false) }
+        let c = wb.editors["\(wb.focusedGroup):\(path)"]
+        _ = await until(5) { c?.colored == true }
+        // Bracket colors: "((" at depth 0 and 1 differ; a bracket inside a string keeps the string color.
+        let ns = tv.text as NSString
+        let theme = EditorTheme(wb.theme, fontSize: wb.fontSize)
+        check("visuals.bracket-colors", theme.bracketPairColors.count >= 3, "\(theme.bracketPairColors.count) colors")
+        // Sticky scroll: scroll into the loop body, the headers pin.
+        _ = await until(30) { !(wb.languages.outlines[path] ?? []).isEmpty }
+        let sym = wb.languages.outlines[path] ?? []
+        check("visuals.outline", !sym.isEmpty, sym.map(\.name).joined(separator: ","))
+        if let loc = tv.location(at: TextLocation(lineNumber: 30, column: 0)),
+           let pos = tv.position(from: tv.beginningOfDocument, offset: loc) {
+            tv.setContentOffset(CGPoint(x: 0, y: tv.caretRect(for: pos).minY - 40), animated: false)
+        }
+        _ = await until(2) { c?.sticky.isHidden == false }
+        check("visuals.sticky-scroll", c?.sticky.isHidden == false, "\(Int(c?.sticky.bounds.height ?? 0)) pt tall")
+        // Caret inside the if-block: breadcrumbs show main, the ruler and guides follow.
+        tv.selectedRange = NSRange(location: ns.range(of: "area(20)").location, length: 0)
+        _ = await until(30) { !(wb.languages.diagnostics[path] ?? []).isEmpty }
+        check("visuals.squiggle", tv.highlightedRanges.contains { $0.id.hasPrefix("diag") && $0.cornerRadius < 0 })
+        await shot("visuals-editor")
+        wb.palette = true
+        try? await Task.sleep(for: .milliseconds(500))
+        await shot("visuals-palette")
+        wb.palette = false
+        wb.alert = "Example error: couldn't reach the desktop."
+        await shot("visuals-toast", wait: 1)
+        wb.alert = nil
+        wb.closeEverywhere(path)
+        try? await d.remove(path: path)
+    }
+
+    static func animations(_ wb: Workbench, _ path: String) async {
+        _ = await open(wb, path)
+        if wb.terminals.isEmpty { wb.newTerminal() }
+        wb.panelOpen = true
+        wb.side = .explorer
+        try? await Task.sleep(for: .seconds(2))
+        guard let s = wb.terminals.last else { return check("anim.terminal", false) }
+        let clock = FrameClock()
+        for (name, toggle) in [("sidebar", { wb.toggleSidebar() }), ("panel", { wb.togglePanel() })] as [(String, () -> Void)] {
+            var dropped = 0, frames = 0, worst = 0.0
+            let resizesBefore = s.resizeCount
+            for _ in 0..<6 {
+                toggle()
+                var last = await clock.next()
+                let start = last
+                while last - start < 0.3 {
+                    let now = await clock.next()
+                    worst = max(worst, now - last)
+                    dropped += max(0, Int(((now - last) / clock.period).rounded()) - 1)
+                    frames += 1
+                    last = now
+                }
+            }
+            check("anim.\(name)", dropped <= frames / 10, String(format: "%d of %d frames missed, worst %.1f ms", dropped, frames + dropped, worst * 1000))
+            if name == "panel" { check("anim.panel-no-resize-storm", s.resizeCount - resizesBefore <= 2, "\(s.resizeCount - resizesBefore) resizes sent") }
+        }
+        clock.stop()
+        wb.panelOpen = true
+        wb.side = .explorer
+        wb.closeEverywhere(path)
+    }
+
+    /// Terminal: Move Terminal into New Window, and New Terminal Window. The shell
+    /// must survive the move and the new window must reattach the same one.
+    static func terminalWindow(_ wb: Workbench, _ d: Desktop, _ root: String) async {
+        guard wb.env?.os != .windows else { return check("termwindow", true, "skipped on Windows") }
+        wb.panelOpen = true
+        wb.newTerminal(title: "move-me")
+        guard let t = wb.terminals.last else { return check("termwindow.open", false) }
+        let pidFile = d.join(base: root, name: ".pid-move")
+        try? await Task.sleep(for: .seconds(2.5))
+        t.send("echo $$ > '\(pidFile)'\r")
+        try? await Task.sleep(for: .seconds(1))
+        let before = (try? await d.readFile(path: pidFile)).map { String(decoding: $0, as: UTF8.self) } ?? "?"
+        let id = t.persistentID
+        let scenes = Set(UIApplication.shared.openSessions.map(\.persistentIdentifier))
+        let bytes = t.received.value
+        let t0 = CACurrentMediaTime()
+        wb.moveTerminalToNewWindow(t.id)
+        check("termwindow.left-main", !wb.terminals.contains { $0.persistentID == id })
+        // The new window's workbench: a terminals-only one holding this shell.
+        let other = await until(15, every: .milliseconds(5)) {
+            Workbench.live.contains { $0.wb?.terminalsOnly != nil && $0.wb?.terminals.first?.view.window != nil && $0.wb?.terminals.first?.persistentID == id }
+        }
+        let ms = (CACurrentMediaTime() - t0) * 1000
+        guard other, let tw = Workbench.live.compactMap(\.wb).first(where: { $0.terminals.first?.persistentID == id && $0.terminalsOnly != nil }),
+              let moved = tw.terminals.first else { return check("termwindow.opened", false) }
+        check("termwindow.opened", true, String(format: "%d new window, terminal on screen in %.0f ms", UIApplication.shared.openSessions.count - scenes.count, ms))
+        check("termwindow.instant-handoff", moved === t && tw.desktop === wb.desktop && moved.received.value == bytes,
+              "same view \(moved === t), shared connection \(tw.desktop === wb.desktop), replayed \(moved.received.value - bytes) bytes")
+        _ = await until(10) { moved.received.value > 0 }
+        moved.send("echo $$ > '\(pidFile)'\r")
+        try? await Task.sleep(for: .seconds(1.5))
+        let after = (try? await d.readFile(path: pidFile)).map { String(decoding: $0, as: UTF8.self) } ?? "!"
+        check("termwindow.same-shell", before == after && !before.isEmpty, "pid \(before.trimmingCharacters(in: .newlines)) -> \(after.trimmingCharacters(in: .newlines))")
+        await shot("terminal-window", wait: 2)
+        // Back into the editor window: same shell again, in the main panel; the
+        // emptied terminal window closes.
+        check("termwindow.editor-window-found", tw.editorWindow === wb)
+        let beforeBack = UIApplication.shared.openSessions.count
+        tw.moveTerminalToEditorWindow(moved.id)
+        let back = await until(10) { wb.terminals.contains { $0.persistentID == id && $0.received.value > 0 } }
+        if back, let s = wb.terminals.first(where: { $0.persistentID == id }) {
+            s.send("echo $$ > '\(pidFile)'\r")
+            try? await Task.sleep(for: .seconds(1.5))
+        }
+        let again = (try? await d.readFile(path: pidFile)).map { String(decoding: $0, as: UTF8.self) } ?? "!"
+        check("termwindow.moved-back", back && again == before, "pid \(again.trimmingCharacters(in: .newlines))")
+        let closed = await until(5) { UIApplication.shared.openSessions.count < beforeBack }
+        check("termwindow.empty-window-closed", closed)
+        if let s = wb.terminals.first(where: { $0.persistentID == id }) { wb.killTerminal(s.id) }
+        // New Terminal Window: a second window with one fresh shell of its own.
+        let existing = Set(Workbench.live.compactMap(\.wb).map(ObjectIdentifier.init))
+        wb.openTerminalWindow()
+        let fresh = await until(20) {
+            Workbench.live.compactMap(\.wb).contains {
+                !existing.contains(ObjectIdentifier($0)) && $0.terminalsOnly == [] && $0.desktop != nil
+                    && $0.terminals.count == 1 && $0.terminals[0].received.value > 0
+            }
+        }
+        check("termwindow.new-window", fresh)
+        await shot("terminal-windows", wait: 2)
+        // Close what this step opened: killing a window's last terminal closes it.
+        for w in Workbench.live.compactMap(\.wb) where w.terminalsOnly != nil {
+            for s in w.terminals { w.killTerminal(s.id) }
+        }
+        for _ in 0..<10 where UIApplication.shared.openSessions.count > scenes.count {
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        let left = UIApplication.shared.openSessions.filter { !scenes.contains($0.persistentIdentifier) }
+        check("termwindow.closes-when-empty", left.isEmpty, "\(left.count) left open")
+        let front = await until(5) { wb.scene?.activationState == .foregroundActive }
+        check("termwindow.back-to-editor", front, "editor window \(String(describing: wb.scene?.activationState.rawValue))")
+        for s in left { UIApplication.shared.requestSceneSessionDestruction(s, options: nil) }
+        try? await d.remove(path: pidFile)
     }
 
     /// Editor ↔ terminal keyboard focus, as on the desktop: one press in the
@@ -1104,9 +1297,18 @@ enum Scenario {
     private var waiting: CheckedContinuation<CFTimeInterval, Never>?
     let period = 1 / Double(UIScreen.main.maximumFramesPerSecond)
 
+    /// The next frame's time, or after 1 s without frames (window not on
+    /// screen) the current time, so a test fails instead of hanging.
     func next() async -> CFTimeInterval {
         await withCheckedContinuation { c in
             waiting = c
+            ticket &+= 1
+            let n = ticket
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                guard let self, self.ticket == n, let w = self.waiting else { return }
+                self.waiting = nil
+                w.resume(returning: CACurrentMediaTime())
+            }
             guard link == nil else { return }
             let l = CADisplayLink(target: self, selector: #selector(tick))
             let fps = Float(UIScreen.main.maximumFramesPerSecond)
@@ -1115,6 +1317,7 @@ enum Scenario {
             link = l
         }
     }
+    private var ticket = 0
     @objc private func tick(_ l: CADisplayLink) {
         let w = waiting
         waiting = nil

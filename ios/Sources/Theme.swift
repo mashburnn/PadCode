@@ -74,6 +74,8 @@ final class VSTheme: ObservableObject {
         Color(uiColor(key, fallbacks, default: def))
     }
 
+    func has(_ key: String) -> Bool { colors[key] != nil }
+
     func uiColor(_ key: String, _ fallbacks: [String] = [], default def: String) -> UIColor {
         for k in [key] + fallbacks { if let c = colors[k] { return c } }
         return UIColor(vsHex: def)!
@@ -117,6 +119,7 @@ final class VSTheme: ObservableObject {
     var quickInputBg: Color { ui("quickInput.background", "editorWidget.background", "sideBar.background", default: "#252526") }
     var quickInputFg: Color { ui("quickInput.foreground", "foreground", default: "#cccccc") }
     var widgetShadow: Color { ui("widget.shadow", default: "#0000005c") }
+    var widgetBorder: Color { ui("widget.border", "editorWidget.border", default: "#ffffff17") }
     var buttonBg: Color { ui("button.background", default: "#0e639c") }
     var buttonFg: Color { ui("button.foreground", default: "#ffffff") }
     var descriptionFg: Color { ui("descriptionForeground", default: "#ccccccb3") }
@@ -241,9 +244,15 @@ final class VSTheme: ObservableObject {
 final class EditorTheme: Runestone.Theme {
     let vs: VSTheme
     let font: UIFont
+    let bracketPairColors: [UIColor]
     init(_ vs: VSTheme, fontSize: CGFloat) {
         self.vs = vs
         font = UIFont(name: "Menlo-Regular", size: fontSize) ?? .monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let defaults = vs.isDark ? ["#ffd700", "#da70d6", "#179fff"] : ["#0431fa", "#319331", "#7b3814"]
+        bracketPairColors = (1...6).compactMap { i in
+            i <= 3 ? vs.uiColor("editorBracketHighlight.foreground\(i)", default: defaults[i - 1])
+                : vs.has("editorBracketHighlight.foreground\(i)") ? vs.uiColor("editorBracketHighlight.foreground\(i)", default: "#ffffff") : nil
+        }
     }
     var textColor: UIColor { vs.uiColor("editor.foreground", ["foreground"], default: "#d4d4d4") }
     var gutterBackgroundColor: UIColor { vs.uiColor("editorGutter.background", ["editor.background"], default: "#1e1e1e") }
@@ -259,6 +268,12 @@ final class EditorTheme: Runestone.Theme {
     var pageGuideHairlineColor: UIColor { vs.uiColor("editorRuler.foreground", default: "#5a5a5a") }
     var pageGuideBackgroundColor: UIColor { .clear }
     var markedTextBackgroundColor: UIColor { vs.uiColor("editor.selectionBackground", default: "#264f78") }
+    var indentGuideColor: UIColor? {
+        vs.uiColor("editorIndentGuide.background1", ["editorIndentGuide.background"], default: vs.isDark ? "#404040" : "#d3d3d3")
+    }
+    var activeIndentGuideColor: UIColor? {
+        vs.uiColor("editorIndentGuide.activeBackground1", ["editorIndentGuide.activeBackground"], default: vs.isDark ? "#707070" : "#939393")
+    }
 
     func textColor(for highlightName: String) -> UIColor? { vs.token(for: highlightName).color }
 
@@ -351,6 +366,13 @@ extension View {
 }
 
 extension View {
+    /// A floating widget's surface (Quick Open, notifications): the theme's
+    /// color over a blur of what's behind it.
+    func floatingSurface(_ color: Color, cornerRadius: CGFloat) -> some View {
+        background { ZStack { Rectangle().fill(.ultraThinMaterial); color.opacity(0.84) } }
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+    }
+
     /// An icon's name for VoiceOver and as a pointer tooltip, like VS Code's.
     func tip(_ label: String) -> some View { accessibilityLabel(label).help(label) }
 }

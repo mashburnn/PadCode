@@ -264,6 +264,13 @@ impl Session {
         let trimmed = path.trim_end_matches(['/', '\\']);
         let cut = trimmed.rfind(['/', '\\']).ok_or_else(|| Error::Remote(format!("can't delete {path}")))?;
         let (parent, name) = (&trimmed[..cut.max(1)], &trimmed[cut + 1..]);
+        // Scratch folders left by a delete that was cut short (app killed) go too.
+        // ponytail: also catches another window's delete in flight; that one then fails and can be retried.
+        if let Ok(entries) = self.list_dir(parent).await {
+            for e in entries.iter().filter(|e| e.name.starts_with(".padcode-delete-")) {
+                let _ = self.rpc.call::<_, Empty>("fs_rm", json!({ "path": join(self.env.os, parent, &e.name) })).await;
+            }
+        }
         let scratch = join(self.env.os, parent, &format!(".padcode-delete-{:016x}", fnv1a(format!("{path}{:?}", std::time::SystemTime::now()).as_bytes())));
         self.mkdirp(&scratch).await?;
         if let Err(e) = self.rename(path, &join(self.env.os, &scratch, name)).await {

@@ -81,6 +81,7 @@ final class LayoutManager {
         }
     }
     var isLineWrappingEnabled = true
+    var indentGuideTabLength = 4 // padcode
     /// Spacing around the text. The left-side spacing defines the distance between the text and the gutter.
     var textContainerInset: UIEdgeInsets = .zero
     var safeAreaInsets: UIEdgeInsets = .zero
@@ -88,9 +89,13 @@ final class LayoutManager {
         didSet {
             if selectedRange != oldValue {
                 updateShownViews()
+                updateActiveIndentGuide() // padcode
             }
         }
     }
+    private struct ActiveIndentGuide: Equatable { let level: Int; let rows: ClosedRange<Int> } // padcode
+    private var activeIndentGuide: ActiveIndentGuide? // padcode
+    private var spaceWidth: (font: UIFont, width: CGFloat)? // padcode
     var lineHeightMultiplier: CGFloat = 1
     var constrainingLineWidth: CGFloat {
         if isLineWrappingEnabled {
@@ -383,6 +388,67 @@ extension LayoutManager {
         }
     }
 
+    // padcode: indent guides. A blank line takes the smaller indent of the
+    // nearest non-blank lines around it, so guides run through gaps in a block.
+    private func indentGuides(for line: DocumentLineNode) -> IndentGuides? {
+        guard let color = theme.indentGuideColor, indentGuideTabLength > 0 else { return nil }
+        let count = indentLevel(ofRow: line.index)
+        guard count > 0 else { return nil }
+        if spaceWidth?.font != theme.font {
+            spaceWidth = (theme.font, (" " as NSString).size(withAttributes: [.font: theme.font]).width)
+        }
+        let space = spaceWidth?.width ?? 7
+        var active: Int?
+        if let a = activeIndentGuide, a.rows.contains(line.index), a.level < count { active = a.level }
+        return IndentGuides(count: count, step: space * CGFloat(indentGuideTabLength), color: color,
+                            active: active, activeColor: theme.activeIndentGuideColor ?? color)
+    }
+
+    private func indentColumns(ofRow row: Int) -> Int? {
+        let l = lineManager.line(atRow: row)
+        let s = stringView.string
+        var cols = 0
+        for i in l.location ..< l.location + l.data.length {
+            switch s.character(at: i) {
+            case 32: cols += 1
+            case 9: cols += indentGuideTabLength - cols % indentGuideTabLength
+            default: return cols
+            }
+        }
+        return nil
+    }
+
+    private func indentLevel(ofRow index: Int) -> Int {
+        if let cols = indentColumns(ofRow: index) { return cols / indentGuideTabLength }
+        var above: Int?, below: Int?
+        var row = index - 1
+        while row >= 0, row > index - 100, above == nil { above = indentColumns(ofRow: row); row -= 1 }
+        row = index + 1
+        while row < lineManager.lineCount, row < index + 100, below == nil { below = indentColumns(ofRow: row); row += 1 }
+        return min(above ?? 0, below ?? 0) / indentGuideTabLength
+    }
+
+    /// padcode: VS Code's active indent guide: the guide of the innermost block
+    /// holding the caret, over that block's lines.
+    private func updateActiveIndentGuide() {
+        var new: ActiveIndentGuide?
+        if theme.indentGuideColor != nil, indentGuideTabLength > 0, let sel = selectedRange,
+           let line = lineManager.line(containingCharacterAt: sel.location) {
+            let level = indentLevel(ofRow: line.index)
+            if level > 0 {
+                var first = line.index, last = line.index
+                while first > 0, line.index - first < 1000, indentLevel(ofRow: first - 1) >= level { first -= 1 }
+                while last < lineManager.lineCount - 1, last - line.index < 1000, indentLevel(ofRow: last + 1) >= level { last += 1 }
+                new = ActiveIndentGuide(level: level - 1, rows: first ... last)
+            }
+        }
+        if new != activeIndentGuide {
+            activeIndentGuide = new
+            setNeedsLayout()
+            layoutIfNeeded()
+        }
+    }
+
     // swiftlint:disable:next function_body_length
     private func layoutLinesInViewport() {
         // Immediately bail out from generating lines in a viewport of zero size.
@@ -409,8 +475,10 @@ extension LayoutManager {
             // Layout line fragments ("sublines") in the line until we have filled the viewport.
             let lineYPosition = line.yPosition
             let lineFragmentControllers = lineController.lineFragmentControllers(in: insetViewport)
+            let guides = indentGuides(for: line) // padcode
             for lineFragmentController in lineFragmentControllers {
                 let lineFragment = lineFragmentController.lineFragment
+                lineFragmentController.indentGuides = lineFragment.index == 0 ? guides : nil // padcode
                 var lineFragmentFrame: CGRect = .zero
                 appearedLineFragmentIDs.insert(lineFragment.id)
                 lineFragmentController.highlightedRangeFragments = highlightService.highlightedRangeFragments(for: lineFragment,

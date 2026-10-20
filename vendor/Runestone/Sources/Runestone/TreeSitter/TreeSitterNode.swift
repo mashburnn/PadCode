@@ -58,6 +58,11 @@ final class TreeSitterNode {
         return Self(node: node)
     }
 
+    // padcode
+    func descendant(forByte byte: ByteCount) -> TreeSitterNode {
+        TreeSitterNode(node: ts_node_descendant_for_byte_range(rawValue, UInt32(byte.value), UInt32(byte.value + 1)))
+    }
+
     func child(at index: Int) -> Self? {
         if index < childCount {
             let node = ts_node_child(rawValue, UInt32(index))

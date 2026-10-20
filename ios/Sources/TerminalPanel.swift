@@ -12,6 +12,10 @@ final class TerminalSession: ObservableObject, Identifiable {
     let cwd: String?
     @Published var title: String
     @Published var exited = false
+    /// Output arrived while another terminal was showing (the tab's dot).
+    @Published var unread = false
+    /// Bumped on BEL, to flash the tab.
+    @Published var bells = 0
     let view: TerminalView
     private var term: Term?
     private var delegate: Delegate?
@@ -152,6 +156,14 @@ final class TerminalSession: ObservableObject, Identifiable {
         try? term?.kill()
     }
 
+    /// Lets go of the desktop shell without ending it (it moves to another window).
+    func detach() {
+        generation += 1 // a late exit/lost from this stream is ignored
+        try? term?.close()
+        term = nil
+        started = false
+    }
+
     fileprivate func send(_ data: ArraySlice<UInt8>) {
         // Synchronous enqueue (microseconds) keeps keystrokes in order with
         // no task hop between the key press and the network write.
@@ -165,10 +177,14 @@ final class TerminalSession: ObservableObject, Identifiable {
         return (max(Int(view.bounds.width / cell.width), 20), max(Int(view.bounds.height / cell.height), 5))
     }
 
+    /// Resizes sent to the desktop (tests).
+    private(set) var resizeCount = 0
+
     fileprivate func resized(cols: Int, rows: Int) {
         sized = true
         guard cols != size.cols || rows != size.rows else { return }
         size = (cols, rows)
+        resizeCount += 1
         try? term?.resize(cols: UInt16(cols), rows: UInt16(rows))
     }
 
@@ -187,6 +203,8 @@ final class TerminalSession: ObservableObject, Identifiable {
         let view: TerminalView
         let generation: Int
         let received: ByteCounter
+        /// When this attach began: the replay of earlier output that follows isn't news.
+        private let attached = CACurrentMediaTime()
         init(owner: TerminalSession, generation: Int) {
             self.owner = owner
             self.generation = generation
@@ -206,7 +224,19 @@ final class TerminalSession: ObservableObject, Identifiable {
             }
             received.add(UInt64(bytes.count))
             bytes.withUnsafeBufferPointer { view.feed(byteArray: ArraySlice($0)) }
+            if !bytes.isEmpty, CACurrentMediaTime() - attached > 1.5, !flagged.swap(true) {
+                DispatchQueue.main.async { [weak owner, flagged] in
+                    MainActor.assumeIsolated {
+                        // Checked again after a beat, so a stream of output costs a few hops a second.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { flagged.swap(false) }
+                        guard let owner, let wb = owner.workbench else { return }
+                        if wb.activeTerminal != owner.id || wb.panelTab != .terminal || !wb.panelOpen { owner.unread = true }
+                    }
+                }
+            }
         }
+        /// One main-thread hop per burst of output, not per chunk.
+        private let flagged = Flag()
 
         static func marker(_ b: [UInt8], code: String) -> (UInt64, Int)? {
             let head = Array("\u{1b}]\(code);".utf8)
@@ -249,7 +279,7 @@ final class TerminalSession: ObservableObject, Identifiable {
         func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
             if let url = URL(string: link) { MainActor.assumeIsolated { UIApplication.shared.open(url) } }
         }
-        func bell(source: TerminalView) {}
+        func bell(source: TerminalView) { MainActor.assumeIsolated { owner?.bells += 1 } }
         func clipboardCopy(source: TerminalView, content: Data) {
             if let s = String(data: content, encoding: .utf8) { UIPasteboard.general.string = s }
         }
@@ -501,6 +531,64 @@ private final class FeedPan: UIPanGestureRecognizer {
     override func location(in view: UIView?) -> CGPoint { point }
 }
 
+/// A window with only terminals in it (Terminal: Move Terminal into New Window).
+/// One row on top, like Terminal.app: the tabs, then New / Split… / Kill.
+struct TerminalWindowView: View {
+    @StateObject var wb: Workbench
+    var target: Binding<TerminalWindowTarget?>
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.scenePhase) private var phase
+    @State private var window: UIWindow?
+
+    var body: some View {
+        let t = wb.theme
+        VStack(spacing: 0) {
+            TerminalPanel().frame(maxHeight: .infinity, alignment: .top)
+        }
+        .avoidKeyboard()
+        .background(Color(t.terminalBg))
+        .background(WindowProbe { window = $0 })
+        .overlay { if wb.desktop == nil { ConnectingOverlay() } }
+        .environmentObject(wb)
+        .environmentObject(wb.languages)
+        .environmentObject(wb.editorStatus)
+        .focusedSceneObject(wb)
+        .preferredColorScheme(t.isDark ? .dark : .light)
+        .statusBarHidden()
+        .persistentSystemOverlays(.hidden)
+        .task { if wb.desktop == nil { await wb.connect() } }
+        .onAppear {
+            wb.openWindowAction = openWindow
+            wb.dismissWindow = { dismissWindow() }
+        }
+        .onChange(of: phase) { _, p in
+            if p == .active { Task { await wb.reconnectIfNeeded() } }
+        }
+        .task(id: phase) {
+            guard phase == .active else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                await wb.reconnectIfNeeded()
+            }
+        }
+        // The window remembers its shells, so a relaunch reattaches them;
+        // closing the last one closes the window (even one in the background).
+        .onChange(of: wb.terminals.map(\.persistentID)) { _, ids in target.wrappedValue?.terminals = ids }
+        // The name iPadOS shows for this window (App Exposé, the window menu).
+        .onChange(of: windowTitle, initial: true) { _, title in window?.windowScene?.title = title }
+        .onChange(of: window) { _, w in
+            wb.scene = w?.windowScene
+            w?.windowScene?.title = windowTitle
+        }
+    }
+
+    private var windowTitle: String {
+        let active = wb.terminals.first { $0.id == wb.activeTerminal }?.title ?? "Terminal"
+        return "\(active) — \(wb.machine.name)"
+    }
+}
+
 /// Hosts a session's existing TerminalView inside SwiftUI.
 struct TerminalHost: UIViewRepresentable {
     @ObservedObject var session: TerminalSession
@@ -546,40 +634,67 @@ struct TerminalHost: UIViewRepresentable {
 struct TerminalPanel: View {
     @EnvironmentObject var wb: Workbench
     @EnvironmentObject var languages: Languages
+    /// The active tab's highlight and underline slide between tabs.
+    @Namespace private var tabs
 
     var body: some View {
         let t = wb.theme
         let problems = languages.counts.errors + languages.counts.warnings
+        let window = wb.terminalsOnly != nil
         VStack(spacing: 0) {
-            Rectangle().fill(t.panelBorder).frame(height: 1)
+            if !window { Rectangle().fill(t.panelBorder).frame(height: 1) }
             HStack(spacing: 14) {
-                panelTab("PROBLEMS", .problems, badge: problems)
-                panelTab("TERMINAL", .terminal, badge: 0)
-                panelTab("PORTS", .ports, badge: wb.forwards.count)
-                Spacer(minLength: 8)
+                if !window {
+                    panelTab("PROBLEMS", .problems, badge: problems)
+                    panelTab("TERMINAL", .terminal, badge: 0)
+                    panelTab("PORTS", .ports, badge: wb.forwards.count)
+                    Spacer(minLength: 8)
+                }
                 if wb.panelTab == .terminal {
                     // Tabs while they fit, else VS Code's "2: zsh ⌄" dropdown; the icons never shrink.
                     ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 2) { ForEach(wb.terminals) { TerminalTab(session: $0) } }
+                        HStack(spacing: 2) {
+                            ForEach(wb.terminals) {
+                                TerminalTab(session: $0, highlight: tabs).transition(.scale(scale: 0.85, anchor: .leading).combined(with: .opacity))
+                            }
+                        }
+                        .animation(.snappy(duration: 0.22), value: wb.terminals.map(\.id))
+                        .animation(.snappy(duration: 0.2), value: wb.activeTerminal)
                         TerminalPicker(titled: true)
                         TerminalPicker(titled: false)
                     }
                     .layoutPriority(1)
                 }
+                // A terminal window's tabs start at the left, like Terminal.app's.
+                if window { Spacer(minLength: 8) }
                 HStack(spacing: 2) {
                     if wb.panelTab == .terminal {
-                        Button { wb.newTerminal() } label: { CodiconView(icon: .add) }.fixedSize().tip("New Terminal")
+                        Button { wb.newTerminal() } label: { CodiconView(icon: .add) }.fixedSize()
+                            .tip(wb.terminalsOnly != nil ? "New Terminal Tab (⌘T)" : "New Terminal")
+                        if wb.terminalsOnly != nil {
+                            if let editor = wb.editorWindow, let id = wb.activeTerminal {
+                                Button { wb.moveTerminalToEditorWindow(id) } label: { CodiconView(icon: .layoutPanel) }.fixedSize()
+                                    .tip("Move Terminal into Editor Window (\(editor.root.isEmpty ? editor.machine.name : editor.baseName(editor.root)))")
+                            }
+                        } else if let id = wb.activeTerminal {
+                            Button { wb.moveTerminalToNewWindow(id) } label: { CodiconView(icon: .multipleWindows) }.fixedSize()
+                                .tip("Move Terminal into New Window")
+                        }
                         Button {
                             if let id = wb.activeTerminal { wb.killTerminal(id) }
                         } label: { CodiconView(icon: .trash) }.fixedSize().tip("Kill Terminal")
                     }
-                    Button { wb.hidePanel() } label: { CodiconView(icon: .close) }.fixedSize().tip("Hide Panel")
+                    if wb.terminalsOnly == nil {
+                        Button { wb.hidePanel() } label: { CodiconView(icon: .close) }.fixedSize().tip("Hide Panel")
+                    }
                 }
                 .fixedSize()
             }
             .buttonStyle(ToolbarButtonStyle())
             .foregroundStyle(t.panelTitleInactiveFg)
             .padding(.horizontal, 12)
+            .background(window ? t.titleBarBg : .clear)
+            .overlay(alignment: .bottom) { if window { Rectangle().fill(t.titleBarBorder).frame(height: 1) } }
             .frame(height: 35)
 
             ZStack {
@@ -609,7 +724,7 @@ struct TerminalPanel: View {
     private func panelTab(_ title: String, _ tab: PanelTab, badge: Int) -> some View {
         let t = wb.theme
         let active = wb.panelTab == tab
-        return Button { wb.panelTab = tab } label: {
+        return Button { withAnimation(.snappy(duration: 0.2)) { wb.panelTab = tab } } label: {
             Hovering { on in
                 VStack(spacing: 3) {
                     HStack(spacing: 4) {
@@ -620,7 +735,10 @@ struct TerminalPanel: View {
                         }
                     }
                     .foregroundStyle(active || on ? t.panelTitleActiveFg : t.panelTitleInactiveFg)
-                    Rectangle().fill(active ? t.panelTitleActiveBorder : .clear).frame(height: 1)
+                    ZStack {
+                        if active { Rectangle().fill(t.panelTitleActiveBorder).matchedGeometryEffect(id: "panel-underline", in: tabs) }
+                    }
+                    .frame(height: 1)
                 }
                 .fixedSize()
                 .contentShape(Rectangle())
@@ -633,12 +751,22 @@ struct TerminalPanel: View {
 
 private struct TerminalTab: View {
     @ObservedObject var session: TerminalSession
+    let highlight: Namespace.ID
     @EnvironmentObject var wb: Workbench
+    @State private var flash = false
     var body: some View {
         let active = session.id == wb.activeTerminal
         Hovering { on in
             HStack(spacing: 4) {
-                CodiconView(icon: wb.env?.os == .windows ? .terminalPowershell : .terminal, size: 14)
+                CodiconView(icon: session.exited ? .debugDisconnect : wb.env?.os == .windows ? .terminalPowershell : .terminal, size: 14)
+                    .foregroundStyle(session.exited ? wb.theme.descriptionFg : .primary)
+                    .overlay(alignment: .topTrailing) {
+                        if session.unread && !active {
+                            Circle().fill(wb.theme.ui("activityBarBadge.background", default: "#007acc")).frame(width: 6, height: 6)
+                                .offset(x: 2, y: -1).transition(.scale.combined(with: .opacity))
+                        }
+                    }
+                    .animation(.snappy(duration: 0.2), value: session.unread && !active)
                 // Long titles (e.g. a running command) are cut, so a tab never grows past ~24 characters.
                 Text(session.title.count > 24 ? session.title.prefix(23) + "…" : session.title).font(.system(size: 12)).lineLimit(1)
                 // VS Code's trash-can "Kill Terminal", on the active or hovered tab.
@@ -648,14 +776,30 @@ private struct TerminalTab: View {
                     .tip("Kill Terminal")
             }
             .padding(.leading, 6).padding(.trailing, 2).padding(.vertical, 2)
-            .background(active ? wb.theme.listActiveBg.opacity(0.6) : on ? wb.theme.listHoverBg : .clear)
-            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .background {
+                if active {
+                    RoundedRectangle(cornerRadius: 5).fill(wb.theme.listActiveBg.opacity(0.6))
+                        .matchedGeometryEffect(id: "terminal-tab", in: highlight)
+                } else if on {
+                    RoundedRectangle(cornerRadius: 5).fill(wb.theme.listHoverBg)
+                }
+            }
+            .overlay { RoundedRectangle(cornerRadius: 5).fill(wb.theme.focusBorder.opacity(flash ? 0.35 : 0)) }
             .foregroundStyle(active || on ? wb.theme.panelTitleActiveFg : wb.theme.panelTitleInactiveFg)
             .contentShape(Rectangle())
             .onTapGesture { wb.focusTerminal(session.id) }
         }
         .fixedSize()
+        .onChange(of: session.bells) {
+            withAnimation(.easeOut(duration: 0.08)) { flash = true }
+            withAnimation(.easeIn(duration: 0.4).delay(0.12)) { flash = false }
+        }
+        .onChange(of: active) { _, a in if a { session.unread = false } }
         .contextMenu {
+            Button { wb.moveTerminalToNewWindow(session.id) } label: { Label("Move Terminal into New Window", systemImage: "macwindow.badge.plus") }
+            if wb.terminalsOnly != nil, wb.editorWindow != nil {
+                Button { wb.moveTerminalToEditorWindow(session.id) } label: { Label("Move Terminal into Editor Window", systemImage: "rectangle.bottomhalf.inset.filled") }
+            }
             Button("Kill Terminal", role: .destructive) { wb.killTerminal(session.id) }
             Button("Kill All Terminals", role: .destructive) { for t in wb.terminals { wb.killTerminal(t.id) } }
         }
@@ -676,6 +820,7 @@ private struct TerminalPicker: View {
             }
             if let id = wb.activeTerminal {
                 Divider()
+                Button("Move Terminal into New Window") { wb.moveTerminalToNewWindow(id) }
                 Button("Kill Terminal", role: .destructive) { wb.killTerminal(id) }
             }
         } label: {
@@ -694,6 +839,13 @@ private struct TerminalPicker: View {
 }
 
 /// Thread-safe byte count (written on the core's thread, read on the main actor).
+final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var on = false
+    /// Sets the flag, returning what it was.
+    @discardableResult func swap(_ v: Bool) -> Bool { lock.lock(); defer { lock.unlock() }; let old = on; on = v; return old }
+}
+
 final class ByteCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var n: UInt64 = 0

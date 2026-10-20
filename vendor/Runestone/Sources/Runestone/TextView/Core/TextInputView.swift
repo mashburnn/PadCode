@@ -285,6 +285,7 @@ final class TextInputView: UIView, UITextInput {
         didSet {
             if indentStrategy != oldValue {
                 indentController.indentStrategy = indentStrategy
+                layoutManager.indentGuideTabLength = indentStrategy.tabLength // padcode
                 layoutManager.setNeedsLayout()
                 setNeedsLayout()
                 layoutIfNeeded()

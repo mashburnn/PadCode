@@ -36,10 +36,12 @@ final class TreeSitterSyntaxHighlighter: LineSyntaxHighlighter {
         let captures = languageMode.captures(in: input.byteRange)
         let tokens = self.tokens(for: captures, localTo: input.byteRange)
         setAttributes(for: tokens, on: input.attributedString)
+        apply(bracketColors(input, line: input.attributedString.string as NSString), to: input)
     }
 
     func syntaxHighlight(_ input: LineSyntaxHighlighterInput, completion: @escaping AsyncCallback) {
         let operation = BlockOperation()
+        let line = NSString(string: input.attributedString.string) // padcode: a copy, read off the main thread
         operation.addExecutionBlock { [weak operation, weak self] in
             guard let operation = operation, let self = self else {
                 DispatchQueue.main.async {
@@ -54,11 +56,13 @@ final class TreeSitterSyntaxHighlighter: LineSyntaxHighlighter {
                 return
             }
             let captures = self.languageMode.captures(in: input.byteRange)
+            let brackets = self.bracketColors(input, line: line) // padcode: off the main thread, like the captures
             if !operation.isCancelled {
                 DispatchQueue.main.async {
                     if !operation.isCancelled {
                         let tokens = self.tokens(for: captures, localTo: input.byteRange)
                         self.setAttributes(for: tokens, on: input.attributedString)
+                        self.apply(brackets, to: input)
                         completion(.success(()))
                     } else {
                         completion(.failure(TreeSitterSyntaxHighlighterError.cancelled))
@@ -81,6 +85,60 @@ final class TreeSitterSyntaxHighlighter: LineSyntaxHighlighter {
 }
 
 private extension TreeSitterSyntaxHighlighter {
+    // padcode: VS Code's bracket pair colorization. Only bracket tokens of the
+    // syntax tree count, so brackets in strings and comments keep their color.
+    // Depth is the number of enclosing bracketed nodes: ones that open with a
+    // bracket among their first children and end with its partner, like
+    // `{ … }` or `( … )`. A `for (…) { … }` doesn't count, its `(` is closed.
+    private func apply(_ brackets: [(Int, UIColor)], to input: LineSyntaxHighlighterInput) {
+        guard !brackets.isEmpty else { return }
+        input.attributedString.beginEditing()
+        for (i, color) in brackets {
+            input.attributedString.addAttribute(.foregroundColor, value: color, range: NSRange(location: i, length: 1))
+        }
+        input.attributedString.endEditing()
+    }
+
+    private func bracketColors(_ input: LineSyntaxHighlighterInput, line string: NSString) -> [(Int, UIColor)] {
+        let colors = theme.bracketPairColors
+        // Hold the tree while walking it: an edit on the main thread can replace
+        // (and free) the layer's tree, as captures(in:) guards against too.
+        guard !colors.isEmpty, let tree = languageMode.tree else { return [] }
+        let root = tree.rootNode
+        guard string.length <= 20_000 else { return [] } // like VS Code, long lines are left alone
+        // Only the tree is read here (this runs off the main thread, as the captures do).
+        let partner: [String: String] = ["(": ")", "[": "]", "{": "}"]
+        func encloses(_ n: TreeSitterNode, _ byte: ByteCount) -> Bool {
+            let count = n.childCount
+            guard count >= 2, n.endByte > byte else { return false }
+            for k in 0 ..< min(count, 3) {
+                if let ch = n.child(at: k), ch.startByte < byte, let t = ch.type, let close = partner[t] {
+                    guard let last = n.child(at: count - 1), last.startByte > byte else { return false }
+                    return last.type == close
+                }
+            }
+            return false
+        }
+        var out: [(Int, UIColor)] = []
+        for i in 0 ..< string.length {
+            let c = string.character(at: i)
+            guard c == 40 || c == 41 || c == 91 || c == 93 || c == 123 || c == 125 else { continue }
+            let byte = input.byteRange.location + ByteCount(i * 2)
+            let node = root.descendant(forByte: byte)
+            guard node.startByte == byte, node.childCount == 0, let type = node.type, type.utf16.count == 1,
+                  type.utf16.first == c, let owner = node.parent else { continue }
+            var depth = 0
+            var ancestor = owner.parent
+            while let n = ancestor {
+                if encloses(n, byte) { depth += 1 }
+                ancestor = n.parent
+            }
+            out.append((i, colors[depth % colors.count]))
+        }
+        withExtendedLifetime(tree) {}
+        return out
+    }
+
     private func setAttributes(for tokens: [TreeSitterSyntaxHighlightToken], on attributedString: NSMutableAttributedString) {
         attributedString.beginEditing()
         for token in tokens {

@@ -102,6 +102,41 @@ struct ExplorerView: View {
     }
 }
 
+/// VS Code's tree indent guides: one line per level, under each parent's
+/// chevron. The guide of the folder holding the open file is brighter.
+private struct IndentGuides: View {
+    let depth: Int
+    let parent: String
+    @EnvironmentObject var wb: Workbench
+
+    var body: some View {
+        if depth > 0 {
+            let t = wb.theme
+            let active = activeLevel
+            ZStack(alignment: .leading) {
+                ForEach(0..<depth, id: \.self) { level in
+                    Rectangle()
+                        .fill(level == active ? t.ui("tree.indentGuidesStroke", default: "#585858")
+                              : t.ui("tree.inactiveIndentGuidesStroke", default: "#58585866"))
+                        .frame(width: 1)
+                        .offset(x: CGFloat(level) * 8 + 11.5)
+                }
+            }
+            .allowsHitTesting(false)
+        }
+    }
+
+    /// The level whose guide runs down the active file's folder, if this row is inside it.
+    private var activeLevel: Int? {
+        guard let a = wb.active else { return nil }
+        let folder = wb.parentDir(a)
+        guard folder != wb.root, wb.isWithin(parent, folder) else { return nil }
+        let extra = wb.relative(parent).split(whereSeparator: { $0 == "/" || $0 == "\\" }).count
+            - wb.relative(folder).split(whereSeparator: { $0 == "/" || $0 == "\\" }).count
+        return depth - 1 - extra
+    }
+}
+
 private struct FolderChildren: View {
     let path: String
     let depth: Int
@@ -109,6 +144,9 @@ private struct FolderChildren: View {
     @EnvironmentObject var wb: Workbench
     @State private var entries: [Entry]?
     @State private var error: String?
+
+    /// Hides the scratch folders deletes go through (Desktop.remove).
+    static func visible(_ e: [Entry]) -> [Entry] { e.filter { !$0.name.hasPrefix(".padcode-delete-") } }
 
     var body: some View {
         Group {
@@ -129,13 +167,13 @@ private struct FolderChildren: View {
         .task(id: wb.explorerGeneration) {
             guard let d = wb.desktop else { return }
             do {
-                entries = try await d.listDir(path: path)
+                entries = Self.visible(try await d.listDir(path: path))
                 error = nil
                 wb.learnSizes(in: path, entries ?? [])
             } catch { self.error = error.localizedDescription }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
-                guard let d = wb.desktop, let fresh = try? await d.listDir(path: path) else { continue }
+                guard let d = wb.desktop, let fresh = (try? await d.listDir(path: path)).map(Self.visible) else { continue }
                 if fresh != entries { entries = fresh }
             }
         }
@@ -162,7 +200,8 @@ private struct TreeRow: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 4) {
                 if isDir {
-                    CodiconView(icon: expanded ? .chevronDown : .chevronRight, size: 16).frame(width: 16)
+                    CodiconView(icon: .chevronRight, size: 16).frame(width: 16)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
                 } else {
                     Color.clear.frame(width: 16)
                     FileIcon(name: entry.name, size: 16)
@@ -185,11 +224,12 @@ private struct TreeRow: View {
             .foregroundStyle(selected ? t.listActiveFg : t.sideBarFg)
             .padding(.leading, CGFloat(depth) * 8 + 4)
             .frame(height: 22)
+            .background(alignment: .leading) { IndentGuides(depth: depth, parent: parent) }
             .background(targeted ? t.dropBg : selected ? t.listActiveBg : .clear)
             .hoverBackground(selected || targeted ? .clear : t.listHoverBg)
             .contentShape(Rectangle())
             .onTapGesture {
-                if isDir { expanded.toggle() } else { Task { await wb.open(path) } }
+                if isDir { withAnimation(.snappy(duration: 0.18)) { expanded.toggle() } } else { Task { await wb.open(path) } }
             }
             // Long-press and drag a row; drop on a folder (or on a file, meaning
             // its folder) to move it there, like the desktop Explorer.
@@ -232,6 +272,7 @@ private struct TreeRow: View {
             }
             if isDir && expanded {
                 FolderChildren(path: path, depth: depth + 1, newItem: $newItem)
+                    .transition(.opacity.combined(with: .offset(y: -6)))
             }
         }
         .alert("Rename", isPresented: $renaming) {
