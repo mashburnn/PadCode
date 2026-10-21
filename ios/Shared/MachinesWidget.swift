@@ -117,7 +117,7 @@ struct RefreshMachines: AppIntent {
 /// HomeStyle (Theme.swift), which the widget extension can't import.
 private struct WidgetPalette {
     let dark: Bool
-    var bg: Color { dark ? Color(white: 0.09) : Color(red: 0.957, green: 0.957, blue: 0.949) }
+    var bg: Color { dark ? Color(white: 0.065) : Color(red: 0.957, green: 0.957, blue: 0.949) }
     var row: Color { dark ? Color(white: 0.145) : .white }
     var fg: Color { dark ? Color(white: 0.93) : Color(white: 0.11) }
     var dim: Color { dark ? Color(white: 0.6) : Color(white: 0.44) }

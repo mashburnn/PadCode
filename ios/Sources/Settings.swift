@@ -43,8 +43,8 @@ final class AppSettings: ObservableObject {
 
     /// Bundled themes: (file, display name).
     static let bundledThemes = [
-        ("github-dark-dimmed", "GitHub Dark Dimmed"),
         ("dark-modern", "Dark Modern"),
+        ("github-dark-dimmed", "GitHub Dark Dimmed"),
         ("dark_plus", "Dark+"),
         ("dark_vs", "Dark (Visual Studio)"),
     ]

@@ -71,7 +71,8 @@ final class VSTheme: ObservableObject {
         return load(data: data, name: name, resolve: read)!
     }
 
-    static let fallback = bundled("github-dark-dimmed")
+    /// Light Modern's sibling: neutral greys like the canvas, so dark reads as one surface too.
+    static let fallback = bundled("dark-modern")
     /// Shown whenever the canvas is light, so panels and chrome agree.
     static let light = bundled("light-modern")
 
@@ -85,8 +86,44 @@ final class VSTheme: ObservableObject {
 
     func uiColor(_ key: String, _ fallbacks: [String] = [], default def: String) -> UIColor {
         for k in [key] + fallbacks { if let c = colors[k] { return c } }
-        return UIColor(vsHex: def)!
+        return UIColor(vsHex: isDark ? def : Self.lightDefaults[key] ?? def)!
     }
+
+    /// VS Code's registry defaults for light themes, for keys its JSON themes leave out.
+    /// The call sites' defaults are the dark ones (light-grey text, navy selections),
+    /// which are unreadable or wrong on white.
+    private static let lightDefaults: [String: String] = [
+        "breadcrumb.foreground": "#616161cc",
+        "editor.lineHighlightBackground": "#0000000a",
+        "editor.selectionBackground": "#add6ff",
+        "editor.wordHighlightBackground": "#57575740",
+        "editorHoverWidget.border": "#c8c8c8",
+        "editorLightBulb.foreground": "#ddb100",
+        "editorRuler.foreground": "#d3d3d3",
+        "editorStickyScroll.shadow": "#dddddd",
+        "editorStickyScrollHover.background": "#f0f0f0",
+        "editorWhitespace.foreground": "#33333333",
+        "keybindingLabel.background": "#dddddd66",
+        "keybindingLabel.bottomBorder": "#bbbbbb99",
+        "list.dropBackground": "#d6ebff",
+        "list.errorForeground": "#b01011",
+        "list.highlightForeground": "#0066bf",
+        "list.warningForeground": "#855f00",
+        "minimapSlider.background": "#64646433",
+        "minimapSlider.hoverBackground": "#64646459",
+        "minimapSlider.activeBackground": "#00000033",
+        "notificationsErrorIcon.foreground": "#e51400",
+        "notificationsInfoIcon.foreground": "#1a85ff",
+        "problemsErrorIcon.foreground": "#e51400",
+        "problemsInfoIcon.foreground": "#1a85ff",
+        "problemsWarningIcon.foreground": "#bf8803",
+        "scrollbar.shadow": "#dddddd",
+        "terminal.selectionBackground": "#add6ff",
+        "terminalCursor.foreground": "#000000",
+        "tree.indentGuidesStroke": "#a9a9a9",
+        "tree.inactiveIndentGuidesStroke": "#a9a9a966",
+        "widget.shadow": "#00000029",
+    ]
 
     var editorBg: Color { ui("editor.background", default: isDark ? "#1e1e1e" : "#ffffff") }
     var editorFg: Color { ui("editor.foreground", "foreground", default: isDark ? "#d4d4d4" : "#000000") }
@@ -686,7 +723,7 @@ extension View {
 
     /// A floating panel on the canvas: the home page's card look (see `Card`).
     func card(_ t: VSTheme, fill: Color, radius: CGFloat = 16, highlighted: Bool = false) -> some View {
-        modifier(Card(fill: fill, radius: radius, highlighted: highlighted))
+        modifier(Card(fill: fill, radius: radius, highlighted: highlighted, accent: t.accent))
     }
 
     /// Popups' surface: Liquid Glass tinted with the theme (iPadOS 26), else blur and tint.
@@ -736,7 +773,7 @@ struct LinkButtonStyle: ButtonStyle {
 /// It travels in the environment, so flipping the toggle redraws every part.
 struct HomeStyle {
     var dark = false
-    var canvas: Color { dark ? Color(white: 0.09) : Color(red: 0.957, green: 0.957, blue: 0.949) }
+    var canvas: Color { dark ? Color(white: 0.065) : Color(red: 0.957, green: 0.957, blue: 0.949) } // a step below the panels (Dark Modern #181818, Light Modern #f8f8f8)
     var card: Color { dark ? Color(white: 0.145) : .white }
     var ink: Color { dark ? Color(white: 0.93) : Color(white: 0.11) }
     var muted: Color { dark ? Color(white: 0.6) : Color(white: 0.44) } // ≥ 4.5:1 on white
@@ -869,6 +906,8 @@ struct Card: ViewModifier {
     let fill: Color
     var radius: CGFloat = 16
     var highlighted = false
+    /// The focused editor's edge: the theme's focus colour, like its tab underline and selections.
+    var accent: Color = .accentColor
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
@@ -878,7 +917,7 @@ struct Card: ViewModifier {
             .overlay {
                 ZStack {
                     CardCorners(radius: radius).fill(h.canvas, style: FillStyle(eoFill: true))
-                    shape.strokeBorder(highlighted ? h.green : h.border, lineWidth: highlighted ? 1.5 : 1)
+                    shape.strokeBorder(highlighted ? accent.opacity(0.8) : h.border, lineWidth: highlighted ? 1.5 : 1)
                 }
                 .allowsHitTesting(false)
             }

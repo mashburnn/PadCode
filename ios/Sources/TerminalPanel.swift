@@ -68,7 +68,7 @@ final class TerminalSession: ObservableObject, Identifiable {
     }
 
     func apply(theme: VSTheme, fontSize: CGFloat) {
-        view.font = UIFont(name: "Menlo-Regular", size: fontSize) ?? .monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        view.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular) // SF Mono: wider, taller, easier at 12 pt than Menlo
         view.nativeBackgroundColor = theme.terminalBg
         view.nativeForegroundColor = theme.terminalFg
         view.caretColor = theme.terminalCursor
@@ -636,7 +636,7 @@ struct TerminalWindowView: View {
             TerminalPanel().frame(maxHeight: .infinity, alignment: .top)
         }
         .avoidKeyboard()
-        .background(Color(t.terminalBg))
+        .background(DotCanvas())
         .environment(\.home, HomeStyle(dark: homeDark))
         .onChange(of: homeDark, initial: true) { wb.lightCanvas = !homeDark }
         .background(WindowProbe { window = $0 })
@@ -681,6 +681,8 @@ struct TerminalWindowView: View {
 
 /// Hosts a session's existing TerminalView inside SwiftUI.
 struct TerminalHost: UIViewRepresentable {
+    /// Room around the text, like the editor's gutter, so it never touches the card's edge.
+    static let inset = UIEdgeInsets(top: 10, left: 14, bottom: 6, right: 6)
     @ObservedObject var session: TerminalSession
     @EnvironmentObject var wb: Workbench
     @ObservedObject private var keyboard = KeyboardState.shared
@@ -712,10 +714,10 @@ struct TerminalHost: UIViewRepresentable {
         v.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(v)
         NSLayoutConstraint.activate([
-            v.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            v.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            v.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
-            v.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            v.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.inset.left),
+            v.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -Self.inset.right),
+            v.topAnchor.constraint(equalTo: container.topAnchor, constant: Self.inset.top),
+            v.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -Self.inset.bottom),
         ])
     }
 }
@@ -795,10 +797,13 @@ struct TerminalPanel: View {
                 .fixedSize()
             }
             .buttonStyle(ToolbarButtonStyle())
-            .foregroundStyle(t.panelTitleInactiveFg)
-            .padding(.horizontal, 10)
-            .background(window ? h.canvas : .clear)
-            .frame(height: 38)
+            .foregroundStyle(window ? h.ink.opacity(0.72) : t.panelTitleInactiveFg)
+            // A terminal window's strip is its title row, on the canvas at the workbench's height,
+            // starting clear of iPadOS's window controls (Terminal.app's traffic-light gap).
+            .padding(.leading, window ? 64 : 10).padding(.trailing, window ? 12 : 10)
+            .frame(height: window ? 44 : 38)
+            .padding(.top, window ? 4 : 0)
+            .overlay(alignment: .bottom) { if !window { Rectangle().fill(t.cardBorder).frame(height: 1) } }
 
             ZStack {
                 // Terminals stay alive (and keep their views) while Problems shows.
@@ -809,7 +814,8 @@ struct TerminalPanel: View {
                     let b = s.view.bounds.size
                     let frozen = !shown && b.width > 100 && b.height > 40
                     TerminalHost(session: s)
-                        .frame(width: frozen ? b.width + 8 : nil, height: frozen ? b.height + 4 : nil)
+                        .frame(width: frozen ? b.width + TerminalHost.inset.left + TerminalHost.inset.right : nil,
+                               height: frozen ? b.height + TerminalHost.inset.top + TerminalHost.inset.bottom : nil)
                         // …but a kept size must never size the panel: one left wider (the
                         // side bar since opened) widened the panel and pushed the window sideways.
                         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .topLeading)
@@ -827,8 +833,9 @@ struct TerminalPanel: View {
                 }
             }
             .animation(Motion.quick, value: wb.panelTab)
+            .modifier(TerminalWindowCard(on: window, theme: t))
         }
-        .background(t.panelBg)
+        .background(window ? .clear : t.panelBg)
     }
 
     private func panelTab(_ title: String, _ tab: PanelTab, badge: Int) -> some View {
@@ -935,9 +942,11 @@ private struct TerminalTab: View {
     @ObservedObject var session: TerminalSession
     let highlight: Namespace.ID
     @EnvironmentObject var wb: Workbench
+    @Environment(\.home) private var h
     @State private var flash = false
     var body: some View {
         let active = session.id == wb.activeTerminal
+        let onCanvas = wb.terminalsOnly != nil // a terminal window's tabs sit on the canvas, not in a panel
         Hovering { on in
             HStack(spacing: 4) {
                 CodiconView(icon: session.exited ? .debugDisconnect : wb.env?.os == .windows ? .terminalPowershell : .terminal, size: 14)
@@ -957,17 +966,19 @@ private struct TerminalTab: View {
                     .opacity(active || on ? 1 : 0)
                     .tip("Kill Terminal")
             }
-            .padding(.leading, 6).padding(.trailing, 2).padding(.vertical, 2)
+            .padding(.leading, onCanvas ? 10 : 6).padding(.trailing, onCanvas ? 6 : 2).padding(.vertical, onCanvas ? 6 : 2)
             .background {
                 if active {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous).fill(wb.theme.raised)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous).fill(onCanvas ? h.card : wb.theme.raised)
+                        .overlay { if onCanvas { RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(h.border) } }
+                        .shadow(color: .black.opacity(onCanvas ? 0.05 * h.shadow : 0), radius: 6, y: 2)
                         .matchedGeometryEffect(id: "terminal-tab", in: highlight)
                 } else if on {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous).fill(wb.theme.hoverFill)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous).fill(onCanvas ? h.chip : wb.theme.hoverFill)
                 }
             }
             .overlay { RoundedRectangle(cornerRadius: 8, style: .continuous).fill(wb.theme.accent.opacity(flash ? 0.35 : 0)) }
-            .foregroundStyle(active || on ? wb.theme.panelTitleActiveFg : wb.theme.panelTitleInactiveFg)
+            .foregroundStyle(onCanvas ? (active || on ? h.ink : h.muted) : (active || on ? wb.theme.panelTitleActiveFg : wb.theme.panelTitleInactiveFg))
             .contentShape(Rectangle())
             .onTapGesture { wb.focusTerminal(session.id) }
         }
@@ -1036,4 +1047,18 @@ final class ByteCounter: @unchecked Sendable {
         set { lock.lock(); n = newValue; lock.unlock() }
     }
     func add(_ k: UInt64) { lock.lock(); n += k; lock.unlock() }
+}
+
+/// In a terminal window the terminals are one card on the canvas, like the workbench's panel.
+private struct TerminalWindowCard: ViewModifier {
+    let on: Bool
+    let theme: VSTheme
+    func body(content: Content) -> some View {
+        if on {
+            content.card(theme, fill: Color(theme.terminalBg))
+                .padding(.horizontal, WorkbenchView.gap).padding(.bottom, WorkbenchView.gap).padding(.top, 4)
+        } else {
+            content
+        }
+    }
 }
