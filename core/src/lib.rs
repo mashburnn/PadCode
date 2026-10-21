@@ -3,9 +3,12 @@
 
 mod auth;
 mod ffi;
+mod local;
 mod lsp;
 mod remote;
 mod rpc;
+mod serve;
+mod ssh;
 mod tunnel;
 
 pub use auth::{finish_login, start_login, DeviceCode};
@@ -17,6 +20,8 @@ pub use lsp::{
     CodeAction, Completion, Diagnostic, Event as LspEvent, FileEdit, LanguageServer, Location, Pos, Range, SignatureHelp, Symbol,
     TextEdit,
 };
+pub use local::connect as connect_local;
+pub use ssh::{connect as connect_ssh, generate_key as generate_ssh_key, public_key as ssh_public_key, LoginKey};
 pub use tunnel::{connect, list_machines, Machine};
 
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +46,12 @@ pub enum Error {
     Closed,
     #[error("protocol error: {0}")]
     Protocol(String),
+    #[error("first connection to this host: its key is {0}")]
+    HostKeyUnknown(String),
+    #[error("this host's key changed (now {0}). That can mean someone is intercepting the connection; PadCode won't connect.")]
+    HostKeyChanged(String),
+    #[error("{0}")]
+    SshAuth(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

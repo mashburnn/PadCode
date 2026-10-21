@@ -51,7 +51,7 @@ struct FolderPicker: View {
             .padding(.horizontal, 10).padding(.top, 8)
 
             HStack(spacing: 6) {
-                TextField("Path", text: $text)
+                TextField("", text: $text, prompt: t.prompt("Path"))
                     .textFieldStyle(.plain).font(.system(size: 13, design: .monospaced))
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .focused($focused)
@@ -62,10 +62,11 @@ struct FolderPicker: View {
                     .onKeyPress(.tab) { complete(); return .handled }
                     .onChange(of: text) { selection = 0 }
                 Button("Open") { openCurrent() }
-                    .buttonStyle(.borderedProminent).tint(t.buttonBg).controlSize(.small)
+                    .buttonStyle(PillButton(filled: true)).font(.system(size: 12, weight: .semibold))
             }
-            .padding(6).background(t.inputBg).foregroundStyle(t.inputFg)
-            .overlay(RoundedRectangle(cornerRadius: 2).stroke(t.focusBorder))
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(t.inputBg, in: RoundedRectangle(cornerRadius: 6, style: .continuous)).foregroundStyle(t.inputFg)
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(t.focusBorder))
             .padding(8)
 
             if let error {
@@ -87,7 +88,7 @@ struct FolderPicker: View {
                             sectionLabel(dir)
                         }
                         if loading && entries.isEmpty {
-                            ProgressView().padding(12)
+                            SkeletonRows(count: 8, theme: t).transition(.opacity)
                         }
                         ForEach(Array(matches.enumerated()), id: \.element.name) { i, e in
                             let index = recents.count + i
@@ -109,9 +110,7 @@ struct FolderPicker: View {
             .foregroundStyle(t.quickInputFg)
         }
         .frame(width: 640)
-        .glass(t.quickInputBg, radius: 16)
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(t.widgetBorder))
-        .shadow(color: .black.opacity(t.isDark ? 0.4 : 0.15), radius: 30, y: 14)
+        .floating(t, t.quickInputBg, radius: 16, lifted: true)
         .padding(.top, 40)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .task(id: parts.base) { await load(parts.base) }
@@ -141,7 +140,7 @@ struct FolderPicker: View {
 
     private func iconButton(_ icon: Codicon, _ label: String, _ action: @escaping () -> Void) -> some View {
         Button(action: action) { CodiconView(icon: icon, size: 16) }
-            .buttonStyle(.plain).tip(label)
+            .buttonStyle(ToolbarButtonStyle()).tip(label)
     }
 
     private func load(_ path: String) async {
@@ -153,7 +152,7 @@ struct FolderPicker: View {
             dir = path
             error = nil
         } catch {
-            self.error = "Can't open \(path): \(error.localizedDescription)"
+            self.error = "Can't open \(path): \(error.userMessage)"
         }
     }
 

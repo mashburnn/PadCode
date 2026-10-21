@@ -122,5 +122,5 @@ pub async fn connect(token: &str, machine: &Machine) -> Result<Session> {
     if version.protocol_version < MIN_PROTOCOL {
         return Err(Error::Outdated(machine.name.clone(), version.protocol_version));
     }
-    Session::start(rpc, relay, machine.name.clone(), version).await
+    Session::start(rpc, crate::remote::Link::Relay(relay), machine.name.clone(), version).await
 }

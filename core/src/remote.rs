@@ -136,10 +136,27 @@ struct SpawnParams<'a> {
     env: HashMap<String, String>,
 }
 
+/// What carries a session: a tunnel relay, an SSH connection, or nothing (this
+/// iPad's Linux, in-process). Dropping it disconnects, so it lives in the session.
+pub(crate) enum Link {
+    Relay(ClientRelayHandle),
+    Ssh(crate::ssh::Conn),
+    Local,
+}
+
+impl Link {
+    fn is_closed(&self) -> bool {
+        match self {
+            Link::Relay(r) => r.is_closed(),
+            Link::Ssh(c) => c.is_closed(),
+            Link::Local => false,
+        }
+    }
+}
+
 pub struct Session {
     rpc: Rpc,
-    // Dropping the relay handle closes the SSH session, so it lives here.
-    _relay: ClientRelayHandle,
+    _relay: Link,
     pub machine: String,
     pub env: Env,
     pty: tokio::sync::Mutex<Option<PtyMode>>,
@@ -156,7 +173,7 @@ pub struct Session {
 impl Session {
     pub(crate) async fn start(
         rpc: Rpc,
-        relay: ClientRelayHandle,
+        relay: Link,
         machine: String,
         version: VersionInfo,
     ) -> Result<Session> {

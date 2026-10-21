@@ -11,8 +11,10 @@ struct ImageViewer: View {
     var body: some View {
         if let data = wb.blobs[path] {
             if (path as NSString).pathExtension.lowercased() == "svg" {
-                // UIImage can't decode SVG; the web view can.
-                HTMLView(html: "<html><body style='margin:0;display:flex;align-items:center;justify-content:center;height:100vh;background:transparent'>\(String(decoding: data, as: UTF8.self))</body></html>", baseURL: nil)
+                // UIImage can't decode SVG; the web view can. No scripts: an SVG
+                // can carry <script>, and a file's content is never trusted.
+                HTMLView(html: "<html><head><meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\"></head><body style='margin:0;display:flex;align-items:center;justify-content:center;height:100vh;background:transparent'>\(String(decoding: data, as: UTF8.self))</body></html>",
+                         baseURL: nil, javaScript: false)
             } else if let image = UIImage(data: data) {
                 ZoomableImage(image: image)
                     .overlay(alignment: .bottomTrailing) {
@@ -100,7 +102,7 @@ struct MarkdownPreview: View {
         // The preview tab's `path` is the markdown file's path + a marker.
         let source = wb.file(MarkdownPreview.sourcePath(file.path))?.text ?? ""
         HTMLView(html: Self.page(markdown: source, theme: wb.theme, fontSize: wb.fontSize),
-                 baseURL: nil)
+                 baseURL: nil, javaScript: true)
     }
 
     static let marker = "\u{200B}#preview"
@@ -123,23 +125,34 @@ struct MarkdownPreview: View {
         let fg = css("editor.foreground", ["foreground"], "#d4d4d4")
         let link = css("textLink.foreground", [], "#3794ff")
         let codeBg = css("textCodeBlock.background", ["editorWidget.background"], "#0a0a0a66")
-        let border = css("textSeparator.foreground", ["panel.border"], "#80808059")
+        let border = "rgba(128,128,128,0.28)" // one soft rule in both themes; the theme's separator is often near-black on light
         let quote = css("textBlockQuote.border", ["focusBorder"], "#007acc")
-        let json = (try? JSONSerialization.data(withJSONObject: [markdown])).flatMap { String(data: $0, encoding: .utf8) } ?? "[\"\"]"
+        // The text goes inside a <script>: "<" escaped, so "</script>" in a
+        // file can't end it early and run its own code.
+        let json = ((try? JSONSerialization.data(withJSONObject: [markdown])).flatMap { String(data: $0, encoding: .utf8) } ?? "[\"\"]")
+            .replacingOccurrences(of: "<", with: "\\u003c")
+        // Only these two scripts run (the nonce); raw HTML in the markdown
+        // (<img onerror=…>, <iframe>) can't run code or load pages.
+        let nonce = UUID().uuidString
         return """
         <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-\(nonce)'; style-src 'unsafe-inline'; img-src https: data:">
         <style>
-        body{background:\(bg);color:\(fg);font:\(Int(fontSize + 2))px -apple-system,system-ui,sans-serif;line-height:1.6;
-             max-width:880px;margin:0 auto;padding:16px 26px 60px;word-wrap:break-word}
-        a{color:\(link)} h1,h2{border-bottom:1px solid \(border);padding-bottom:.3em}
-        code{font-family:Menlo,monospace;font-size:.9em;background:\(codeBg);padding:.15em .35em;border-radius:4px}
-        pre{background:\(codeBg);padding:12px;border-radius:6px;overflow:auto} pre code{background:none;padding:0}
-        blockquote{margin:0;padding:0 1em;border-left:4px solid \(quote);opacity:.85}
-        table{border-collapse:collapse} th,td{border:1px solid \(border);padding:6px 12px}
-        img{max-width:100%} hr{border:0;border-top:1px solid \(border)}
-        </style><script>\(markedJS)</script></head><body>
+        body{background:\(bg);color:\(fg);font:\(Int(fontSize + 3))px -apple-system,system-ui,sans-serif;line-height:1.65;
+             max-width:760px;margin:0 auto;padding:24px 32px 80px;word-wrap:break-word;-webkit-font-smoothing:antialiased}
+        a{color:\(link);text-decoration-thickness:1px;text-underline-offset:2px}
+        h1,h2,h3{line-height:1.25;letter-spacing:-.01em;margin:1.4em 0 .5em} h1{font-size:2em} h2{font-size:1.5em;border-bottom:1px solid \(border);padding-bottom:.3em}
+        p,ul,ol{margin:.6em 0} li{margin:.2em 0}
+        code{font-family:Menlo,monospace;font-size:.88em;background:\(codeBg);padding:.15em .4em;border-radius:5px}
+        pre{background:\(codeBg);padding:14px 16px;border-radius:10px;overflow:auto;line-height:1.5} pre code{background:none;padding:0;font-size:.9em}
+        blockquote{margin:1em 0;padding:.2em 1em;border-left:3px solid \(quote);opacity:.85;border-radius:2px}
+        table{border-collapse:separate;border-spacing:0;border:1px solid \(border);border-radius:8px;overflow:hidden;margin:1em 0}
+        th,td{padding:8px 14px;border-bottom:1px solid \(border);text-align:left} th{background:\(codeBg);font-weight:600}
+        tr:last-child td{border-bottom:0} td+td,th+th{border-left:1px solid \(border)}
+        img{max-width:100%;border-radius:8px} hr{border:0;border-top:1px solid \(border);margin:2em 0}
+        </style><script nonce="\(nonce)">\(markedJS)</script></head><body>
         <div id="c"></div>
-        <script>document.getElementById('c').innerHTML = marked.parse(\(json)[0], {gfm: true});</script>
+        <script nonce="\(nonce)">document.getElementById('c').innerHTML = marked.parse(\(json)[0], {gfm: true});</script>
         </body></html>
         """
     }
@@ -149,10 +162,11 @@ struct MarkdownPreview: View {
 struct HTMLView: UIViewRepresentable {
     let html: String
     let baseURL: URL?
+    var javaScript = false
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        config.defaultWebpagePreferences.allowsContentJavaScript = true
+        config.defaultWebpagePreferences.allowsContentJavaScript = javaScript
         let v = WKWebView(frame: .zero, configuration: config)
         v.isOpaque = false
         v.backgroundColor = .clear
@@ -179,16 +193,23 @@ struct HTMLView: UIViewRepresentable {
             webView.scrollView.setContentOffset(CGPoint(x: 0, y: restoreY), animated: false)
         }
 
-        // Links open in Safari, not inside the preview.
+        /// The page never navigates: only its own content (and #anchors) loads.
+        /// Web and mail links open in Safari/Mail; anything else (app URL schemes,
+        /// a script redirecting the page) is dropped.
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                      decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
-            if action.navigationType == .linkActivated, let url = action.request.url {
-                UIApplication.shared.open(url)
-                decisionHandler(.cancel)
-            } else {
-                decisionHandler(.allow)
+            let url = action.request.url
+            if url == nil || url?.scheme == "about" {
+                decisionHandler(.allow) // the page itself, or a jump within it
+                return
             }
+            if action.navigationType == .linkActivated, let url, Self.external.contains(url.scheme?.lowercased() ?? "") {
+                UIApplication.shared.open(url)
+            }
+            decisionHandler(.cancel)
         }
+
+        static let external: Set<String> = ["http", "https", "mailto"]
     }
 }
 
@@ -234,13 +255,14 @@ struct TransferToast: View {
                     }
             }
         }
-        .padding(.trailing, 16).padding(.bottom, 40)
+        .padding(.trailing, 16).padding(.bottom, wb.zen ? 16 : 26 + 12) // above the status bar
         .animation(Motion.popup, value: wb.transfer ?? wb.toast)
         .animation(Motion.popup, value: wb.alert)
     }
 
     /// Every notification is the same glass; its kind shows in the icon well.
     private func toast(_ t: VSTheme, _ msg: String, icon: Codicon?, color: Color, close: (() -> Void)?) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
         HStack(alignment: .center, spacing: 10) {
             ZStack {
                 Circle().fill(color.opacity(0.18))
@@ -258,12 +280,31 @@ struct TransferToast: View {
                     .buttonStyle(ToolbarButtonStyle(padding: 3)).tip("Clear Notification")
             }
         }
+        // A transfer's bar: it fills as files go up; a download (one file, size
+        // unknown) shimmers instead.
+        if icon == nil {
+            Group {
+                if let p = wb.transferProgress {
+                    GeometryReader { g in
+                        Capsule().fill(t.raised)
+                            .overlay(alignment: .leading) {
+                                Capsule().fill(color).frame(width: max(6, g.size.width * p))
+                                    .animation(Motion.layout, value: p)
+                            }
+                    }
+                } else {
+                    Skeleton(height: 4, radius: 2, theme: t)
+                }
+            }
+            .frame(height: 4)
+            .padding(.leading, 38)
+            .transition(.opacity)
+        }
+        }
         .padding(.leading, 10).padding(.trailing, 8).padding(.vertical, 10)
         .frame(width: 400)
         .foregroundStyle(t.ui("notifications.foreground", "editor.foreground", default: "#cccccc"))
-        .glass(t.ui("notifications.background", "editorWidget.background", default: "#252526"), radius: 16)
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(t.widgetBorder))
-        .shadow(color: .black.opacity(t.isDark ? 0.35 : 0.12), radius: 18, y: 8)
+        .floating(t, t.ui("notifications.background", "editorWidget.background", default: "#252526"), radius: 16)
         .transition(.pop(from: .bottomTrailing))
     }
 }

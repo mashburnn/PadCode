@@ -105,6 +105,23 @@ final class TextInputView: UIView, UITextInput {
     var smartDashesType: UITextSmartDashesType = .default
     var smartInsertDeleteType: UITextSmartInsertDeleteType = .default
     var spellCheckingType: UITextSpellCheckingType = .default
+    // padcode: no predictive text, Writing Tools or math completion in a code
+    // editor; each is keyboard work on every focus change and keystroke.
+    @available(iOS 17.0, *)
+    var inlinePredictionType: UITextInlinePredictionType {
+        get { .no }
+        set {}
+    }
+    @available(iOS 18.0, *)
+    var writingToolsBehavior: UIWritingToolsBehavior {
+        get { .none }
+        set {}
+    }
+    @available(iOS 18.0, *)
+    var mathExpressionCompletionType: UITextMathExpressionCompletionType {
+        get { .no }
+        set {}
+    }
     var keyboardType: UIKeyboardType = .default
     var keyboardAppearance: UIKeyboardAppearance = .default
     var returnKeyType: UIReturnKeyType = .default

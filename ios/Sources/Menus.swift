@@ -76,6 +76,7 @@ struct PadCommands: Commands {
             Button("Toggle Panel") { wb?.togglePanel() }.keyboardShortcut("j")
             Button("Zen Mode") { wb?.toggleZen() }
             Button("Split Editor Right") { wb?.splitRight() }.keyboardShortcut("\\")
+            Button("Toggle Dark Canvas") { Appearance.toggle(in: wb?.scene) }.keyboardShortcut("l", modifiers: [.command, .control])
             Divider()
             Button("Word Wrap") { AppSettings.shared.wordWrap.toggle() }.keyboardShortcut("z", modifiers: .option)
             Button("Zoom In") { if let w = wb { w.fontSize = min(w.fontSize + 1, 32) } }.keyboardShortcut("=")

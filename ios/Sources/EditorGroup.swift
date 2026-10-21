@@ -176,7 +176,7 @@ private struct EditorTab: View {
             }
         }
         .frame(height: 40)
-        .animation(.easeOut(duration: 0.12), value: hover)
+        .animation(Motion.hover, value: hover)
         .contentShape(Rectangle())
         .onTapGesture { wb.focus(file.path, in: group) }
         .onHover { hover = $0 }
@@ -226,7 +226,9 @@ struct TabDrag: DropDelegate {
     let group: Int
     let wb: Workbench
 
-    func validateDrop(info: DropInfo) -> Bool { wb.draggingTab != nil }
+    /// Only while a tab drag is live (one cancelled earlier leaves `draggingTab`
+    /// set until the next drag starts; Explorer rows clear it).
+    func validateDrop(info: DropInfo) -> Bool { wb.draggingTab != nil && info.hasItemsConforming(to: [.plainText]) }
     func dropEntered(info: DropInfo) {
         guard let from = wb.draggingTab, wb.groups.indices.contains(group), wb.groups[group].tabs.contains(from) else { return }
         wb.moveTab(from, onto: target, in: group)
@@ -264,7 +266,7 @@ private struct Breadcrumbs: View {
                 }
             }
             .padding(.horizontal, 12)
-            .animation(.snappy(duration: 0.15), value: chain)
+            .animation(Motion.quick, value: chain)
         }
         .foregroundStyle(t.breadcrumbFg)
         .frame(height: 22)
@@ -327,35 +329,63 @@ private struct Breadcrumbs: View {
     }
 }
 
-/// The empty editor: the app's mark, then shortcuts; it assembles itself
-/// (a short staggered rise) each time it appears.
+/// The empty editor: a quiet mark, what to do next (tappable), and the
+/// shortcuts underneath for a hardware keyboard. It assembles itself (a short
+/// staggered rise) each time it appears.
 private struct Watermark: View {
     @EnvironmentObject var wb: Workbench
     @State private var appeared = false
 
     var body: some View {
         let t = wb.theme
-        VStack(spacing: 14) {
+        VStack(spacing: 18) {
             Image(systemName: "chevron.left.forwardslash.chevron.right")
-                .font(.system(size: 54, weight: .light))
-                .foregroundStyle(LinearGradient(colors: [t.accent, t.accent.opacity(0.35)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                .opacity(0.5)
+                .font(.system(size: 44, weight: .light))
+                .foregroundStyle(t.descriptionFg.opacity(0.5))
                 .symbolEffect(.bounce, value: appeared)
                 .rise(appeared, 0)
-                .padding(.bottom, 6)
-            if wb.root.isEmpty { start.rise(appeared, 1) }
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 9) {
-                row("Show All Commands", "⇧ ⌘ P").rise(appeared, 2)
-                row("Go to File", "⌘ P").rise(appeared, 3)
+            if wb.root.isEmpty {
+                start.rise(appeared, 1)
+            } else {
+                VStack(spacing: 4) {
+                    Text("Nothing open").font(.system(size: 16, weight: .semibold)).foregroundStyle(t.editorFg)
+                    Text("Pick a file in the Explorer, or").font(.system(size: 13)).foregroundStyle(t.descriptionFg)
+                }
+                .rise(appeared, 1)
+                HStack(spacing: 10) {
+                    action("Go to File", "doc.text.magnifyingglass") { wb.palette = false; wb.quickOpen = true }
+                    action("New Terminal", "terminal") { wb.newTerminal(); wb.panelOpen = true }
+                }
+                .rise(appeared, 2)
+            }
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
+                row("Show All Commands", "⇧ ⌘ P").rise(appeared, 3)
                 row("Find in Files", "⇧ ⌘ F").rise(appeared, 4)
                 row("Toggle Terminal", "⌃ `").rise(appeared, 5)
                 row("Toggle Sidebar", "⌘ B").rise(appeared, 6)
             }
-            .font(.system(size: 13))
-            .foregroundStyle(t.descriptionFg)
+            .font(.system(size: 12))
+            .foregroundStyle(t.descriptionFg.opacity(0.8))
+            .padding(.top, 10)
         }
-        .onAppear { appeared = true }
-        .onDisappear { appeared = false }
+        .onAppear { appeared = true } // the entrance plays once per window, not on every last-tab close
+    }
+
+    /// A quiet pill: the theme's raised fill, brighter under the pointer.
+    private func action(_ title: String, _ symbol: String, _ act: @escaping () -> Void) -> some View {
+        let t = wb.theme
+        return Button(action: act) {
+            Hovering { on in
+                Label(title, systemImage: symbol).font(.system(size: 13, weight: .medium))
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(on ? t.raised.opacity(1.6) : t.raised, in: Capsule())
+                    .overlay(Capsule().strokeBorder(t.cardBorder))
+                    .foregroundStyle(t.editorFg)
+                    .animation(Motion.hover, value: on)
+            }
+        }
+        .buttonStyle(PressDown())
+        .hoverEffectDisabled()
     }
 
     /// VS Code's Welcome "Start" and "Recent" lists, shown until a folder is open.
@@ -620,14 +650,16 @@ struct CodeEditor: UIViewRepresentable {
             tv.setState(state)
             context.coordinator.colored = true
         }
-        tv.backgroundColor = wb.theme.uiColor("editor.background", default: "#1e1e1e")
-        tv.insertionPointColor = wb.theme.uiColor("editorCursor.foreground", default: "#aeafad")
+        // Fallbacks are VS Code's registry defaults for each kind of theme (its JSON themes omit most of these).
+        let dark = wb.theme.isDark
+        tv.backgroundColor = wb.theme.uiColor("editor.background", default: dark ? "#1e1e1e" : "#ffffff")
+        tv.insertionPointColor = wb.theme.uiColor("editorCursor.foreground", default: dark ? "#aeafad" : "#000000")
         tv.selectionBarColor = tv.insertionPointColor
-        tv.selectionHighlightColor = wb.theme.uiColor("editor.selectionBackground", default: "#264f78")
+        tv.selectionHighlightColor = wb.theme.uiColor("editor.selectionBackground", default: dark ? "#264f78" : "#add6ff")
         (tv as? PadTextView)?.bracketColor = wb.theme.uiColor("editorBracketMatch.background", default: "#0064001a").withAlphaComponent(0.45)
         (tv as? PadTextView)?.occurrenceColor = wb.theme.uiColor("editor.wordHighlightBackground", default: "#575757b8")
         (tv as? PadTextView)?.selectionMatchColor = wb.theme.uiColor("editor.selectionHighlightBackground", default: "#add6ff26")
-        (tv as? PadTextView)?.linkColor = wb.theme.uiColor("editorLink.activeForeground", ["textLink.foreground"], default: "#4e94ce")
+        (tv as? PadTextView)?.linkColor = wb.theme.uiColor("editorLink.activeForeground", ["textLink.foreground"], default: dark ? "#4e94ce" : "#006ab1")
         tv.keyboardAppearance = wb.theme.isDark ? .dark : .light
         if selection.location <= (text as NSString).length { tv.selectedRange = selection }
         context.coordinator.themeName = wb.theme.name
@@ -1087,7 +1119,7 @@ final class Minimap: UIView, UIGestureRecognizerDelegate {
         let gen = generation
         let editorTheme = EditorTheme(theme, fontSize: 12)
         backgroundColor = theme.uiColor("minimap.background", ["editor.background"], default: "#1e1e1e")
-        sliderColors = (theme.uiColor("minimapSlider.background", default: "#79797933").cgColor,
+        sliderColors = (UIColor.clear.cgColor, // shown under the pointer only, like VS Code's "mouseover"
                         theme.uiColor("minimapSlider.hoverBackground", default: "#64646459").cgColor,
                         theme.uiColor("minimapSlider.activeBackground", default: "#bfbfbf33").cgColor)
         let language = text.utf16.count > 1_000_000 ? nil : Language.treeSitter(for: fileName)

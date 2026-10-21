@@ -170,7 +170,7 @@ pub(crate) struct Rpc {
     shared: Arc<Mutex<Shared>>,
 }
 
-fn encode<P: Serialize>(id: Option<u32>, method: &str, params: P) -> Vec<u8> {
+pub(crate) fn encode<P: Serialize>(id: Option<u32>, method: &str, params: P) -> Vec<u8> {
     rmp_serde::to_vec_named(&Request { id, method, params }).expect("msgpack encode")
 }
 

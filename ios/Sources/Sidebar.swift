@@ -9,22 +9,40 @@ struct ExplorerView: View {
     @State private var rootTargeted = false
     /// Bumped by Collapse All: the tree is rebuilt with every folder closed.
     @State private var collapses = 0
+    /// The selection pill glides from row to row as the active editor changes.
+    @Namespace private var selection
 
     var body: some View {
         let t = wb.theme
         VStack(alignment: .leading, spacing: 0) {
             SideHeader(title: "EXPLORER") {
                 if !wb.root.isEmpty {
-                    Button { wb.uploadTarget = wb.root } label: { CodiconView(icon: .cloudUpload) }
-                        .tip("Upload from iPad")
+                    // Two actions in view; the rest behind ⋯, so the header stays quiet.
                     Button { newItem = (wb.root, false) } label: { CodiconView(icon: .newFile) }.tip("New File…")
                     Button { newItem = (wb.root, true) } label: { CodiconView(icon: .newFolder) }.tip("New Folder…")
-                    Button { wb.explorerGeneration += 1 } label: { CodiconView(icon: .refresh) }.tip("Refresh Explorer")
-                    Button { collapses += 1 } label: { CodiconView(icon: .collapseAll) }.tip("Collapse Folders in Explorer")
+                    Menu {
+                        Button { wb.uploadTarget = wb.root } label: { Label("Upload from iPad…", systemImage: "square.and.arrow.up") }
+                        Button { wb.explorerGeneration += 1 } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                        Button { collapses += 1 } label: { Label("Collapse Folders", systemImage: "rectangle.compress.vertical") }
+                        Divider()
+                        Button { wb.picker = true } label: { Label("Open Folder…", systemImage: "folder") }
+                    } label: {
+                        CodiconView(icon: .ellipsis).padding(3).contentShape(Rectangle())
+                    }
+                    .hoverEffectDisabled()
+                    .tip("More Actions…")
+                } else {
+                    Button { wb.picker = true } label: { CodiconView(icon: .folderOpened) }.tip("Open Folder…")
                 }
-                Button { wb.picker = true } label: { CodiconView(icon: .folderOpened) }.tip("Open Folder…")
             }
-            if wb.root.isEmpty {
+            if wb.desktop == nil && wb.connectError == nil && wb.trustPrompt == nil {
+                // Connecting: the shape of a folder listing, not "no folder" that then jumps.
+                VStack(alignment: .leading, spacing: 0) {
+                    Skeleton(width: 110, height: 10, theme: t).padding(.leading, 12).frame(height: 24)
+                    SkeletonRows(count: 12, theme: t)
+                }
+                .transition(.opacity)
+            } else if wb.root.isEmpty {
                 noFolder(t)
             } else {
                 HStack(spacing: 4) {
@@ -33,7 +51,7 @@ struct ExplorerView: View {
                     Spacer()
                 }
                 .foregroundStyle(t.sideBarTitleFg)
-                .padding(.horizontal, 4).frame(height: 22)
+                .padding(.horizontal, 4).frame(height: 24)
                 .background(rootTargeted ? t.dropBg : t.sectionHeaderBg)
                 .onDrop(of: [.item], isTargeted: $rootTargeted) { handleDrop($0, into: wb.root, wb: wb) }
 
@@ -42,6 +60,8 @@ struct ExplorerView: View {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             FolderChildren(path: wb.root, depth: 0, newItem: $newItem)
                         }
+                        .environment(\.explorerSelection, selection)
+                        .animation(Motion.pop, value: wb.active)
                         .id("\(wb.root)#\(collapses)")
                         // Empty space below the tree also drops into the root folder.
                         Color.clear.frame(height: 120).contentShape(Rectangle())
@@ -51,6 +71,7 @@ struct ExplorerView: View {
             }
             Spacer(minLength: 0)
         }
+        .animation(Motion.layout, value: wb.desktop == nil)
         .alert(newItem?.isDir == true ? "New Folder" : "New File", isPresented: Binding(get: { newItem != nil }, set: { if !$0 { newItem = nil } })) {
             TextField("name", text: $newName).textInputAutocapitalization(.never).autocorrectionDisabled()
             Button("Create") { create() }
@@ -79,10 +100,7 @@ struct ExplorerView: View {
     private func noFolder(_ t: VSTheme) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("You have not yet opened a folder.").font(.system(size: 13))
-            Button { wb.picker = true } label: {
-                Text("Open Folder").font(.system(size: 13)).frame(maxWidth: .infinity).padding(.vertical, 4)
-            }
-            .buttonStyle(.borderedProminent).tint(t.buttonBg)
+            PrimaryButton(title: "Open Folder", theme: t) { wb.picker = true }
             ForEach(wb.recentFolders.prefix(5), id: \.self) { path in
                 Button { wb.openFolder(path) } label: {
                     HStack(spacing: 6) {
@@ -154,14 +172,18 @@ private struct FolderChildren: View {
     var body: some View {
         Group {
             if let entries {
-                ForEach(entries, id: \.name) { e in
+                ForEach(Array(entries.enumerated()), id: \.element.name) { i, e in
                     TreeRow(entry: e, parent: path, depth: depth, newItem: $newItem)
+                        // The top level comes into focus over its skeleton, top to bottom.
+                        .transition(depth == 0 ? .blurFade.animation(Motion.layout.delay(Double(min(i, 14)) * 0.025)) : .identity)
                 }
             } else if let error {
                 Text(error).font(.system(size: 12)).foregroundStyle(wb.theme.errorFg)
-                    .padding(.leading, CGFloat(depth) * 8 + 24).frame(height: 22)
+                    .padding(.leading, CGFloat(depth) * 8 + 24).frame(height: 24)
+            } else if depth == 0 {
+                SkeletonRows(count: 10, theme: wb.theme)
             } else {
-                ProgressView().scaleEffect(0.6).padding(.leading, CGFloat(depth) * 8 + 20).frame(height: 22)
+                ProgressView().scaleEffect(0.6).padding(.leading, CGFloat(depth) * 8 + 20).frame(height: 24)
             }
         }
         // Re-lists on refresh/move while keeping which folders are expanded,
@@ -173,7 +195,7 @@ private struct FolderChildren: View {
                 entries = Self.visible(try await d.listDir(path: path))
                 error = nil
                 wb.learnSizes(in: path, entries ?? [])
-            } catch { self.error = error.localizedDescription }
+            } catch { self.error = error.userMessage }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
                 guard let d = wb.desktop, let fresh = (try? await d.listDir(path: path)).map(Self.visible) else { continue }
@@ -194,6 +216,7 @@ private struct TreeRow: View {
     @State private var renaming = false
     @State private var newName = ""
     @State private var targeted = false
+    @Environment(\.explorerSelection) private var selectionNS
 
     var body: some View {
         let t = wb.theme
@@ -226,30 +249,34 @@ private struct TreeRow: View {
             }
             .foregroundStyle(selected ? t.listActiveFg : t.sideBarFg)
             .padding(.leading, CGFloat(depth) * 8 + 4)
-            .frame(height: 22)
+            .frame(height: 24)
             .background(alignment: .leading) { IndentGuides(depth: depth, parent: parent) }
             .background {
-                // Rounded, inset from the card's edges.
-                if targeted || selected {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(targeted ? t.dropBg : t.accent.opacity(0.2))
-                        .padding(.horizontal, 6)
+                // Rounded, inset from the card's edges; the selection is one pill that moves.
+                if targeted {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous).fill(t.dropBg).padding(.horizontal, 6)
+                } else if selected {
+                    let pill = RoundedRectangle(cornerRadius: 6, style: .continuous).fill(t.accent.opacity(0.2)).padding(.horizontal, 6)
+                    if let selectionNS { pill.matchedGeometryEffect(id: "explorer-selection", in: selectionNS) } else { pill }
                 }
             }
             .hoverBackground(selected || targeted ? .clear : t.hoverFill, cornerRadius: 6, inset: 6)
             .contentShape(Rectangle())
             .onTapGesture {
-                if isDir { withAnimation(.snappy(duration: 0.18)) { expanded.toggle() } } else { Task { await wb.open(path) } }
+                if isDir { withAnimation(Motion.quick) { expanded.toggle() } } else { Task { await wb.open(path) } }
             }
             // Long-press and drag a row; drop on a folder (or on a file, meaning
             // its folder) to move it there, like the desktop Explorer.
-            .draggable(path) {
+            .onDrag {
+                wb.draggingTab = nil // a tab drag cancelled earlier mustn't claim this one
+                return NSItemProvider(object: path as NSString)
+            } preview: {
                 HStack(spacing: 4) {
                     if isDir { CodiconView(icon: .folder, size: 14) } else { FileIcon(name: entry.name, size: 14) }
                     Text(entry.name).font(.system(size: 13))
                 }
                 .padding(6).background(t.listActiveBg).foregroundStyle(t.listActiveFg)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
             .onDrop(of: [.item], isTargeted: $targeted) { handleDrop($0, into: isDir ? path : parent, wb: wb) }
             .contextMenu {
@@ -276,7 +303,7 @@ private struct TreeRow: View {
                             try await wb.desktop?.remove(path: path)
                             for f in wb.files where wb.isWithin(f.path, path) { wb.closeEverywhere(f.path) }
                             wb.explorerGeneration += 1
-                        } catch { wb.alert = error.localizedDescription }
+                        } catch { wb.alert = error.userMessage }
                     }
                 }
             }
@@ -363,34 +390,32 @@ struct SearchView: View {
             }
             .padding(.leading, 6).padding(.trailing, 12)
             if searching { ProgressView().padding(.horizontal, 12) }
-            if let message {
+            if let message, !hits.isEmpty {
                 Text(message).font(.system(size: 12)).foregroundStyle(t.descriptionFg).padding(.horizontal, 12)
+            }
+            if hits.isEmpty && !searching {
+                // Before a search, or after one with nothing: a quiet picture, not a bare line.
+                let none = message != nil
+                VStack(spacing: 8) {
+                    Image(systemName: none ? "magnifyingglass.circle" : "magnifyingglass")
+                        .font(.system(size: 28, weight: .light)).foregroundStyle(t.descriptionFg.opacity(0.6))
+                        .symbolBounceIn()
+                    Text(message ?? "Search across \(wb.baseName(wb.root))").font(.system(size: 12)).foregroundStyle(t.descriptionFg)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity).padding(.top, 36)
+                .transition(.blurFade)
             }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(grouped, id: \.0) { file, fileHits in
-                        HStack(spacing: 4) {
-                            FileIcon(name: file, size: 14)
-                            Text((file as NSString).lastPathComponent).font(.system(size: 13))
-                            Text((file as NSString).deletingLastPathComponent).font(.system(size: 12))
-                                .foregroundStyle(t.descriptionFg).lineLimit(1)
-                            Spacer()
-                            if wb.replaceMode {
-                                Button { Task { await replace(in: [file]) } } label: { CodiconView(icon: .replaceAll, size: 13) }
-                                    .buttonStyle(ToolbarButtonStyle(padding: 2)).tip("Replace All in File")
-                            }
-                            Text("\(fileHits.count)").font(.system(size: 11)).padding(.horizontal, 5)
-                                .background(t.activityBadgeBg).clipShape(Capsule())
-                        }
-                        .padding(.horizontal, 12).frame(height: 22)
-                        ForEach(Array(fileHits.enumerated()), id: \.offset) { _, h in
-                            hitRow(h, t)
-                        }
+                        fileGroup(file, fileHits, t).transition(.blurFade)
                     }
                 }
             }
             .foregroundStyle(t.sideBarFg)
         }
+        .animation(Motion.layout, value: hits.count)
         .onAppear { focused = true }
         .onChange(of: matchCase) { if !query.isEmpty { run() } }
         .onChange(of: wholeWord) { if !query.isEmpty { run() } }
@@ -400,6 +425,28 @@ struct SearchView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Replace \(visibleHits.count) occurrence\(visibleHits.count == 1 ? "" : "s") across \(Set(visibleHits.map(\.path)).count) file\(Set(visibleHits.map(\.path)).count == 1 ? "" : "s") with '\(replacement)'?")
+        }
+    }
+
+    /// One file's header row, then its hits.
+    @ViewBuilder
+    private func fileGroup(_ file: String, _ fileHits: [Hit], _ t: VSTheme) -> some View {
+        HStack(spacing: 4) {
+            FileIcon(name: file, size: 14)
+            Text((file as NSString).lastPathComponent).font(.system(size: 13))
+            Text((file as NSString).deletingLastPathComponent).font(.system(size: 12))
+                .foregroundStyle(t.descriptionFg).lineLimit(1)
+            Spacer()
+            if wb.replaceMode {
+                Button { Task { await replace(in: [file]) } } label: { CodiconView(icon: .replaceAll, size: 13) }
+                    .buttonStyle(ToolbarButtonStyle(padding: 2)).tip("Replace All in File")
+            }
+            Text("\(fileHits.count)").font(.system(size: 11)).padding(.horizontal, 5)
+                .background(t.activityBadgeBg).clipShape(Capsule())
+        }
+        .padding(.horizontal, 12).frame(height: 24)
+        ForEach(Array(fileHits.enumerated()), id: \.offset) { _, h in
+            hitRow(h, t)
         }
     }
 
@@ -428,14 +475,14 @@ struct SearchView: View {
     private func field<Trailing: View>(_ prompt: String, text: Binding<String>, @ViewBuilder trailing: () -> Trailing) -> some View {
         let t = wb.theme
         return HStack(spacing: 2) {
-            TextField(prompt, text: text)
+            TextField("", text: text, prompt: t.prompt(prompt))
                 .textFieldStyle(.plain).font(.system(size: 13))
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
             trailing()
         }
-        .padding(.horizontal, 6).frame(height: 26)
-        .background(t.inputBg).foregroundStyle(t.inputFg)
-        .overlay(RoundedRectangle(cornerRadius: 2).stroke(t.inputBorder))
+        .padding(.horizontal, 8).frame(height: 28)
+        .background(t.inputBg, in: RoundedRectangle(cornerRadius: 6, style: .continuous)).foregroundStyle(t.inputFg)
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(t.inputBorder))
     }
 
     private func toggle(_ icon: Codicon, _ label: String, _ on: Binding<Bool>) -> some View {
@@ -499,7 +546,7 @@ struct SearchView: View {
                 let files = Set(hits.map(\.path)).count
                 message = hits.isEmpty ? "No results found." : "\(hits.count) results in \(files) files"
             } catch {
-                message = error.localizedDescription
+                message = error.userMessage
             }
             searching = false
         }
@@ -527,7 +574,7 @@ struct SearchView: View {
             } else {
                 let bytes = Data((crlf ? out.replacingOccurrences(of: "\n", with: "\r\n") : out).utf8)
                 do { try await d.writeFile(path: path, data: bytes) } catch {
-                    wb.alert = "Couldn't write \(rel): \(error.localizedDescription)"
+                    wb.alert = "Couldn't write \(rel): \(error.userMessage)"
                     continue
                 }
             }
@@ -554,5 +601,14 @@ struct SideHeader<Actions: View>: View {
         .foregroundStyle(wb.theme.sideBarTitleFg)
         .padding(.leading, 14).padding(.trailing, 8)
         .frame(height: 40)
+    }
+}
+
+private struct ExplorerSelectionKey: EnvironmentKey { static let defaultValue: Namespace.ID? = nil }
+extension EnvironmentValues {
+    /// The Explorer's selection pill namespace, handed down the recursive tree.
+    var explorerSelection: Namespace.ID? {
+        get { self[ExplorerSelectionKey.self] }
+        set { self[ExplorerSelectionKey.self] = newValue }
     }
 }

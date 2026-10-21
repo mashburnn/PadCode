@@ -112,7 +112,7 @@ final class TerminalSession: ObservableObject, Identifiable {
                 started = false
                 connectionLost(wb)
             } catch {
-                view.feed(text: "\r\n\u{1b}[31m[could not start terminal: \(error.localizedDescription)]\u{1b}[0m\r\n")
+                view.feed(text: "\r\n\u{1b}[31m[could not start terminal: \(error.userMessage)]\u{1b}[0m\r\n")
                 exited = true
                 started = false
             }
@@ -166,7 +166,11 @@ final class TerminalSession: ObservableObject, Identifiable {
     /// and doesn't know the shell's current folder after `cd`.
     func openLink(_ link: String) {
         guard let (path, line, column) = Self.fileLink(link), let wb = workbench, let d = wb.desktop else {
-            if let url = URL(string: link), url.scheme != nil { UIApplication.shared.open(url) }
+            // Web and mail links only: terminal output mustn't trigger app URL
+            // schemes (shortcuts://run-shortcut, tel:, …) with a click.
+            if let url = URL(string: link), HTMLView.Coordinator.external.contains(url.scheme?.lowercased() ?? "") {
+                UIApplication.shared.open(url)
+            }
             return
         }
         let full = path.hasPrefix("/") ? path
@@ -317,10 +321,14 @@ final class TerminalSession: ObservableObject, Identifiable {
             MainActor.assumeIsolated { owner?.openLink(link) }
         }
         func bell(source: TerminalView) { MainActor.assumeIsolated { owner?.bells += 1 } }
+        /// A program may set the iPad clipboard (OSC 52, as vim or tmux yank does)…
         func clipboardCopy(source: TerminalView, content: Data) {
-            if let s = String(data: content, encoding: .utf8) { UIPasteboard.general.string = s }
+            guard content.count <= 1 << 20, let s = String(data: content, encoding: .utf8) else { return }
+            UIPasteboard.general.string = s
         }
-        func clipboardRead(source: TerminalView) -> Data? { UIPasteboard.general.string.map { Data($0.utf8) } }
+        /// …but never read it: anything printed to the terminal (a cat'ed file, a
+        /// script) could otherwise take whatever was last copied, passwords included.
+        func clipboardRead(source: TerminalView) -> Data? { nil }
         func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
         func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
     }
@@ -433,6 +441,23 @@ final class PointerSelection: NSObject, UIGestureRecognizerDelegate {
 /// paced like a native scroll: one report per few rows of travel, then momentum.
 final class PadTerminalView: TerminalView {
     weak var pointer: PointerSelection?
+
+    // No predictive text, Writing Tools or math completion in a terminal
+    // (SwiftTerm leaves them on); UIKit asks for these by selector.
+    @objc var inlinePredictionType: UITextInlinePredictionType {
+        get { .no }
+        set {}
+    }
+    @available(iOS 18.0, *)
+    @objc var writingToolsBehavior: UIWritingToolsBehavior {
+        get { .none }
+        set {}
+    }
+    @available(iOS 18.0, *)
+    @objc var mathExpressionCompletionType: UITextMathExpressionCompletionType {
+        get { .no }
+        set {}
+    }
     /// SwiftTerm's one-finger wheel pan; it exists only while a program tracks the mouse.
     private(set) weak var wheel: UIPanGestureRecognizer?
     /// Two-finger trackpad scrolling, for such a program.
@@ -603,6 +628,7 @@ struct TerminalWindowView: View {
     @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.scenePhase) private var phase
     @State private var window: UIWindow?
+    @AppStorage("homeDark") private var homeDark = false
 
     var body: some View {
         let t = wb.theme
@@ -611,6 +637,8 @@ struct TerminalWindowView: View {
         }
         .avoidKeyboard()
         .background(Color(t.terminalBg))
+        .environment(\.home, HomeStyle(dark: homeDark))
+        .onChange(of: homeDark, initial: true) { wb.lightCanvas = !homeDark }
         .background(WindowProbe { window = $0 })
         .overlay { if wb.desktop == nil { ConnectingOverlay() } }
         .environmentObject(wb)
@@ -619,7 +647,6 @@ struct TerminalWindowView: View {
         .focusedSceneObject(wb)
         .preferredColorScheme(t.isDark ? .dark : .light)
         .statusBarHidden()
-        .persistentSystemOverlays(.hidden)
         .task { if wb.desktop == nil { await wb.connect() } }
         .onAppear {
             wb.openWindowAction = openWindow
@@ -697,6 +724,7 @@ struct TerminalHost: UIViewRepresentable {
 struct TerminalPanel: View {
     @EnvironmentObject var wb: Workbench
     @EnvironmentObject var languages: Languages
+    @Environment(\.home) private var h
     /// The active tab's highlight and underline slide between tabs.
     @Namespace private var tabs
 
@@ -727,8 +755,8 @@ struct TerminalPanel: View {
                                 TerminalTab(session: $0, highlight: tabs).transition(.scale(scale: 0.85, anchor: .leading).combined(with: .opacity))
                             }
                         }
-                        .animation(.snappy(duration: 0.22), value: wb.terminals.map(\.id))
-                        .animation(.snappy(duration: 0.2), value: wb.activeTerminal)
+                        .animation(Motion.quick, value: wb.terminals.map(\.id))
+                        .animation(Motion.quick, value: wb.activeTerminal)
                         TerminalPicker(titled: true)
                         TerminalPicker(titled: false)
                     }
@@ -769,7 +797,7 @@ struct TerminalPanel: View {
             .buttonStyle(ToolbarButtonStyle())
             .foregroundStyle(t.panelTitleInactiveFg)
             .padding(.horizontal, 10)
-            .background(window ? t.canvasBg : .clear)
+            .background(window ? h.canvas : .clear)
             .frame(height: 38)
 
             ZStack {
@@ -792,12 +820,13 @@ struct TerminalPanel: View {
                     TerminalFind(session: s)
                 }
                 if wb.panelTab == .problems {
-                    ProblemsView().background(t.panelBg)
+                    ProblemsView().background(t.panelBg).transition(.blurFade)
                 }
                 if wb.panelTab == .ports {
-                    PortsView().background(t.panelBg)
+                    PortsView().background(t.panelBg).transition(.blurFade)
                 }
             }
+            .animation(Motion.quick, value: wb.panelTab)
         }
         .background(t.panelBg)
     }
@@ -811,7 +840,7 @@ struct TerminalPanel: View {
                     Text(title).font(.system(size: 12, weight: active ? .semibold : .medium))
                     if badge > 0 {
                         Text("\(badge)").font(.system(size: 10, weight: .semibold)).padding(.horizontal, 5).frame(minWidth: 16, minHeight: 15)
-                            .background(t.activityBadgeBg).foregroundStyle(.white).clipShape(Capsule())
+                            .background(t.activityBadgeBg).foregroundStyle(t.ui("activityBarBadge.foreground", default: "#ffffff")).clipShape(Capsule())
                             .contentTransition(.numericText())
                             .transition(.scale.combined(with: .opacity))
                     }
@@ -851,13 +880,13 @@ private struct TerminalFind: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .animation(.snappy(duration: 0.18), value: session.finding)
+        .animation(Motion.quick, value: session.finding)
     }
 
     private var bar: some View {
         let t = wb.theme
         return HStack(spacing: 2) {
-            TextField("Find", text: $query)
+            TextField("", text: $query, prompt: t.prompt("Find"))
                 .textFieldStyle(.plain).font(.system(size: 13))
                 .autocorrectionDisabled().textInputAutocapitalization(.never)
                 .focused($focused)
@@ -868,8 +897,9 @@ private struct TerminalFind: View {
                     return .handled
                 }
                 .onKeyPress(.escape) { close(); return .handled }
-                .padding(.horizontal, 6).frame(width: 180, height: 24)
-                .background(t.inputBg).overlay(RoundedRectangle(cornerRadius: 2).stroke(focused ? t.focusBorder : t.inputBorder))
+                .padding(.horizontal, 8).frame(width: 180, height: 26)
+                .background(t.inputBg, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(focused ? t.focusBorder : t.inputBorder))
             Text(query.isEmpty ? "" : count.total == 0 ? "No results" : "\(count.index) of \(count.total)")
                 .font(.system(size: 12)).foregroundStyle(count.total == 0 && !query.isEmpty ? t.errorFg : t.descriptionFg)
                 .frame(minWidth: 70)
@@ -879,9 +909,7 @@ private struct TerminalFind: View {
         }
         .buttonStyle(ToolbarButtonStyle())
         .padding(4)
-        .glass(t.ui("editorWidget.background", default: "#252526"), radius: 12)
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(t.widgetBorder))
-        .shadow(color: .black.opacity(0.3), radius: 6, y: 2)
+        .floating(t, t.ui("editorWidget.background", default: "#252526"))
         .onAppear { focused = true }
         .onChange(of: query) { _, q in
             // Searching from the bottom as you type, like VS Code.
@@ -920,7 +948,7 @@ private struct TerminalTab: View {
                                 .offset(x: 2, y: -1).transition(.scale.combined(with: .opacity))
                         }
                     }
-                    .animation(.snappy(duration: 0.2), value: session.unread && !active)
+                    .animation(Motion.quick, value: session.unread && !active)
                 // Long titles (e.g. a running command) are cut, so a tab never grows past ~24 characters.
                 Text(session.title.count > 24 ? session.title.prefix(23) + "…" : session.title).font(.system(size: 12)).lineLimit(1)
                 // VS Code's trash-can "Kill Terminal", on the active or hovered tab.
@@ -932,13 +960,13 @@ private struct TerminalTab: View {
             .padding(.leading, 6).padding(.trailing, 2).padding(.vertical, 2)
             .background {
                 if active {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous).fill(wb.theme.raised)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous).fill(wb.theme.raised)
                         .matchedGeometryEffect(id: "terminal-tab", in: highlight)
                 } else if on {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous).fill(wb.theme.hoverFill)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous).fill(wb.theme.hoverFill)
                 }
             }
-            .overlay { RoundedRectangle(cornerRadius: 7, style: .continuous).fill(wb.theme.accent.opacity(flash ? 0.35 : 0)) }
+            .overlay { RoundedRectangle(cornerRadius: 8, style: .continuous).fill(wb.theme.accent.opacity(flash ? 0.35 : 0)) }
             .foregroundStyle(active || on ? wb.theme.panelTitleActiveFg : wb.theme.panelTitleInactiveFg)
             .contentShape(Rectangle())
             .onTapGesture { wb.focusTerminal(session.id) }
@@ -984,7 +1012,7 @@ private struct TerminalPicker: View {
                 CodiconView(icon: .chevronDown, size: 12)
             }
             .padding(.horizontal, 6).padding(.vertical, 2)
-            .hoverBackground(wb.theme.listHoverBg, cornerRadius: 5)
+            .hoverBackground(wb.theme.listHoverBg, cornerRadius: 6)
             .foregroundStyle(wb.theme.panelTitleActiveFg)
         }
         .hoverEffectDisabled()

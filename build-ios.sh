@@ -27,7 +27,7 @@ for target in $TARGETS; do
 done
 
 OUT=ios/Generated
-rm -rf "$OUT"
+rm -rf "$OUT/PadCoreFFI.xcframework" "$OUT/padcore.swift" "$OUT/headers" "$OUT/bindings" # not build-linux.sh's outputs
 mkdir -p "$OUT/headers"
 cargo run -q -p padcore --features bindgen --bin uniffi-bindgen -- \
   generate --library "target/${TARGETS%% *}/$PROFILE/libpadcore.a" \

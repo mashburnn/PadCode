@@ -34,6 +34,12 @@ pub enum PadError {
     #[error("{msg}")]
     NoServer { msg: String, install: String, detail: String },
     #[error("{msg}")]
+    HostKeyUnknown { msg: String, fingerprint: String },
+    #[error("{msg}")]
+    HostKeyChanged { msg: String, fingerprint: String },
+    #[error("{msg}")]
+    SshAuth { msg: String },
+    #[error("{msg}")]
     Other { msg: String },
 }
 
@@ -46,6 +52,9 @@ impl From<Error> for PadError {
             Error::Conflict => PadError::Conflict { msg },
             Error::Closed => PadError::Closed { msg },
             Error::NoLanguageServer { install, detail, .. } => PadError::NoServer { msg, install, detail },
+            Error::HostKeyUnknown(fingerprint) => PadError::HostKeyUnknown { msg, fingerprint },
+            Error::HostKeyChanged(fingerprint) => PadError::HostKeyChanged { msg, fingerprint },
+            Error::SshAuth(_) => PadError::SshAuth { msg },
             _ => PadError::Other { msg },
         }
     }
@@ -181,6 +190,40 @@ pub struct Desktop(Arc<remote::Session>);
 #[uniffi::export]
 pub async fn connect(token: String, machine: MachineInfo) -> R<Arc<Desktop>> {
     let s = on_rt(async move { crate::connect(&token, &machine.into()).await }).await?;
+    Ok(Arc::new(Desktop(Arc::new(s))))
+}
+
+/// PadCode's SSH login key: the private half stays in the iPad Keychain.
+#[derive(uniffi::Record)]
+pub struct SshKey {
+    pub private_pem: String,
+    pub public_openssh: String,
+}
+
+/// The public line for a key already in the Keychain.
+#[uniffi::export]
+pub fn ssh_public_key(private_pem: String) -> R<String> {
+    Ok(crate::ssh_public_key(&private_pem)?)
+}
+
+#[uniffi::export]
+pub fn ssh_generate_key() -> R<SshKey> {
+    let k = crate::generate_ssh_key()?;
+    Ok(SshKey { private_pem: k.private_pem, public_openssh: k.public_openssh })
+}
+
+/// An SSH desktop. `fingerprint` is the host key the user trusted (None the
+/// first time: that fails with HostKeyUnknown carrying the key to show).
+#[uniffi::export]
+pub async fn connect_ssh(host: String, port: u16, user: String, private_pem: String, fingerprint: Option<String>) -> R<Arc<Desktop>> {
+    let s = on_rt(async move { crate::connect_ssh(&host, port, &user, &private_pem, fingerprint.as_deref()).await }).await?;
+    Ok(Arc::new(Desktop(Arc::new(s))))
+}
+
+/// Linux on this iPad, in-process (the app boots it first, LocalLinux.swift).
+#[uniffi::export]
+pub async fn connect_local() -> R<Arc<Desktop>> {
+    let s = on_rt(crate::connect_local()).await?;
     Ok(Arc::new(Desktop(Arc::new(s))))
 }
 

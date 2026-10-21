@@ -66,9 +66,19 @@ struct OutlineView: View {
         let current = model.symbols.lastIndex { Int($0.range.start.line) <= caretLine && caretLine <= Int($0.range.end.line) }
         VStack(alignment: .leading, spacing: 0) {
             SideHeader(title: "OUTLINE") {
-                Button { Task { await model.load(wb) } } label: { CodiconView(icon: .refresh) }
+                Button { Task { await model.load(wb) } } label: { CodiconView(icon: .refresh) }.tip("Refresh")
             }
-            if let m = model.message {
+            if model.loading && model.symbols.isEmpty {
+                SkeletonRows(count: 8, theme: t).transition(.opacity)
+            } else if let m = model.message, model.symbols.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "list.bullet.indent").font(.system(size: 26, weight: .light))
+                        .foregroundStyle(t.descriptionFg.opacity(0.6)).symbolBounceIn()
+                    Text(m).font(.system(size: 12)).foregroundStyle(t.descriptionFg).multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity).padding(.horizontal, 20).padding(.top, 36)
+                .transition(.blurFade)
+            } else if let m = model.message {
                 Text(m).font(.system(size: 12)).foregroundStyle(t.descriptionFg).padding(.horizontal, 20).padding(.top, 4)
             }
             ScrollView {
@@ -82,9 +92,14 @@ struct OutlineView: View {
                             Spacer()
                         }
                         .padding(.leading, CGFloat(sym.depth) * 12 + 16)
-                        .frame(height: 22)
-                        .background(i == current ? t.listActiveBg : .clear)
-                        .hoverBackground(i == current ? .clear : t.listHoverBg)
+                        .frame(height: 24)
+                        .background {
+                            if i == current {
+                                RoundedRectangle(cornerRadius: 6, style: .continuous).fill(t.accent.opacity(0.2)).padding(.horizontal, 6)
+                            }
+                        }
+                        .hoverBackground(i == current ? .clear : t.hoverFill, cornerRadius: 6, inset: 6)
+                        .animation(Motion.quick, value: current)
                         .foregroundStyle(i == current ? t.listActiveFg : t.sideBarFg)
                         .contentShape(Rectangle())
                         .onTapGesture { reveal(sym) }

@@ -19,3 +19,7 @@ Also: `TextView.contentOffset` is `open` (PadCode's sticky scroll follows it).
 Also: a `HighlightedRange` with a negative `cornerRadius` is drawn as a squiggly underline (`drawSquiggle`, for diagnostics).
 Active indent guide: `LayoutManager.updateActiveIndentGuide` (on selection change) brightens the guide of the block holding the caret (`Theme.activeIndentGuideColor`).
 A `cornerRadius` of -2 or less draws a plain underline instead (⌘-hover links).
+
+- `TextInputView` turns off inline predictions, Writing Tools and math
+  completion (marked "padcode"): none fit a code editor, and each adds
+  keyboard work on focus changes and keystrokes.

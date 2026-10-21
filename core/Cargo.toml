@@ -21,6 +21,12 @@ base64 = "0.22"
 thiserror = "2"
 log = "0.4"
 uniffi = { version = "0.32", features = ["tokio"] }
+# SSH desktops: the same russh the tunnel relay uses (patched to vscode-russh in
+# the workspace Cargo.toml), plus SFTP over one of its channels.
+russh = "0.37"
+russh-keys = "0.37"
+russh-sftp = "2"
+async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["full"] }

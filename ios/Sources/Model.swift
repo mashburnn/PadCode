@@ -48,6 +48,11 @@ final class Account: ObservableObject {
     }
     @Published var machines: [MachineInfo] = []
     @Published var loading = false
+    /// The first listing came back (until then the home page shows skeletons).
+    @Published var loadedOnce = false
+    /// How many tunnel desktops the last listing had: that many skeleton cards,
+    /// so the page doesn't change shape when the real ones arrive.
+    var lastCount: Int { max(UserDefaults.standard.object(forKey: "tunnelCount") as? Int ?? 2, 1) }
     @Published var error: String?
     @Published var pendingLogin: DeviceLogin?
     /// Last seen OS per tunnel id, for icons in the machine list.
@@ -66,7 +71,7 @@ final class Account: ObservableObject {
             await refresh()
         } catch {
             pendingLogin = nil
-            self.error = error.localizedDescription
+            self.error = error.userMessage
         }
     }
 
@@ -74,26 +79,33 @@ final class Account: ObservableObject {
         TokenStore.clear()
         token = nil
         machines = []
+        WidgetBridge.publish()
     }
 
     func refresh() async {
         guard let token else { return }
         loading = true
-        defer { loading = false }
+        defer {
+            loading = false
+            loadedOnce = true
+            WidgetBridge.publish()
+        }
         do {
             machines = try await listMachines(token: token)
+            UserDefaults.standard.set(machines.count, forKey: "tunnelCount")
             error = nil
         } catch PadError.AuthExpired {
             signOut()
             error = "GitHub sign-in expired. Sign in again."
         } catch {
-            self.error = error.localizedDescription
+            self.error = error.userMessage
         }
     }
 
     func remember(os: HostOs, for id: String) {
         knownOS[id] = "\(os)"
         UserDefaults.standard.set(knownOS, forKey: "knownOS")
+        WidgetBridge.publish()
     }
 }
 
@@ -197,6 +209,8 @@ final class Workbench: ObservableObject {
     @Published var env: HostEnv?
     @Published var status: String = "Connecting…"
     @Published var connectError: String?
+    /// SSH: the host key to confirm before the first connection ("SHA256:…").
+    @Published var trustPrompt: String?
     @Published var root: String = ""
     /// Every open document, shared by all groups (one buffer per path).
     @Published var files: [OpenFile] = []
@@ -230,7 +244,12 @@ final class Workbench: ObservableObject {
     var draggingTab: String?
     @Published var quickOpen = false
     @Published var palette = false
-    @Published var theme: VSTheme = .fallback
+    /// What the panels show: the light theme on a light canvas, else the chosen one.
+    @Published private(set) var theme: VSTheme = UserDefaults.standard.bool(forKey: "homeDark") ? .fallback : .light
+    /// The theme from Settings (or the desktop's VS Code), used on a dark canvas.
+    var chosenTheme: VSTheme = .fallback { didSet { refreshTheme() } }
+    var lightCanvas = !UserDefaults.standard.bool(forKey: "homeDark") { didSet { refreshTheme() } }
+    private func refreshTheme() { theme = lightCanvas ? .light : chosenTheme }
     @Published var fontSize: CGFloat = 12
     @Published var tabSize = 4
     @Published var terminals: [TerminalSession] = []
@@ -329,7 +348,7 @@ final class Workbench: ObservableObject {
         else { return } // e.g. restored after a relaunch: connect() reattaches by ID
         desktop = source.desktop
         env = source.env
-        theme = source.theme
+        chosenTheme = source.chosenTheme
         fontSize = source.fontSize
         tabSize = source.tabSize
         status = machine.name
@@ -520,10 +539,25 @@ final class Workbench: ObservableObject {
 
     func connect() async {
         connectError = nil
+        trustPrompt = nil
         status = "Connecting to \(machine.name)…"
-        guard let token = Account.shared.token else { return }
         do {
-            let d = try await padcoreConnect(token: token, machine: machine)
+            let d: Desktop
+            if machine.isSSH {
+                guard let h = SSHHosts.shared.host(for: machine) else { connectError = "This SSH host was removed from PadCode."; return }
+                guard SSHKey.privateKey != nil || !SSHKey.publicKey.isEmpty, let key = SSHKey.privateKey else {
+                    connectError = "PadCode couldn't create its SSH key."
+                    return
+                }
+                d = try await connectSsh(host: h.host, port: h.port, user: h.user, privatePem: key, fingerprint: h.fingerprint)
+            } else if machine.isLocal {
+                // Linux inside PadCode: boot it, then talk to it in-process.
+                try await LocalLinux.shared.start { [weak self] in self?.status = $0 }
+                d = try await connectLocal()
+            } else {
+                guard let token = Account.shared.token else { return }
+                d = try await padcoreConnect(token: token, machine: machine)
+            }
             let e = d.env()
             desktop = d
             env = e
@@ -545,8 +579,10 @@ final class Workbench: ObservableObject {
             await syncSettings()
         } catch PadError.AuthExpired {
             Account.shared.signOut()
+        } catch let PadError.HostKeyUnknown(_, fingerprint) {
+            trustPrompt = fingerprint // ConnectingOverlay asks; trusting it reconnects
         } catch {
-            connectError = error.localizedDescription
+            connectError = error.userMessage
         }
     }
 
@@ -565,6 +601,14 @@ final class Workbench: ObservableObject {
     }
 
     private var reconnectTask: Task<Void, Never>?
+
+    /// SSH: the user accepted the host key shown; remember it and connect.
+    func trustHostKey() {
+        guard let fp = trustPrompt else { return }
+        SSHHosts.shared.trust(fp, for: machine)
+        trustPrompt = nil
+        Task { await connect() }
+    }
 
     /// Replaces the connection. Concurrent callers (health check, app resume,
     /// terminals noticing the drop) all wait on the same attempt.
@@ -596,7 +640,7 @@ final class Workbench: ObservableObject {
         fontSize = settings.fontSize.map { CGFloat($0) } ?? (s["editor.fontSize"] as? Double).map { CGFloat($0) } ?? 12
         tabSize = settings.tabSize ?? (s["editor.tabSize"] as? Int) ?? 4
         if settings.themeChoice != AppSettings.desktopTheme {
-            theme = VSTheme.bundled(settings.themeChoice)
+            chosenTheme = VSTheme.bundled(settings.themeChoice)
         }
     }
 
@@ -617,7 +661,7 @@ final class Workbench: ObservableObject {
     /// Loads a theme by its VS Code name from the desktop's extensions.
     func useDesktopTheme(named name: String) async {
         guard let d = desktop, let e = env, let t = await findTheme(named: name, d, e) else { return }
-        theme = t
+        chosenTheme = t
     }
 
     private func settingsPath(_ e: HostEnv) -> String {
@@ -636,7 +680,7 @@ final class Workbench: ObservableObject {
         applySettings()
         let name = settings.desktopThemeName ?? (s["workbench.colorTheme"] as? String)
         if settings.themeChoice == AppSettings.desktopTheme, let name, let t = await findTheme(named: name, d, e) {
-            theme = t
+            chosenTheme = t
         }
     }
 
@@ -714,7 +758,7 @@ final class Workbench: ObservableObject {
                 await open(path)
             }
             explorerGeneration += 1
-        } catch { alert = error.localizedDescription }
+        } catch { alert = error.userMessage }
     }
 
     /// Go Back (⌃-) / Go Forward (⌃⇧-), like VS Code.
@@ -781,7 +825,7 @@ final class Workbench: ObservableObject {
             languages.opened(path)
             return true
         } catch {
-            if !quiet { alert = error.localizedDescription }
+            if !quiet { alert = error.userMessage }
             return false
         }
     }
@@ -971,8 +1015,8 @@ final class Workbench: ObservableObject {
             conflict = path
         } catch {
             // Auto-save retries on the next edit; don't interrupt typing with alerts.
-            if auto { toast = "Couldn't save \(baseName(path)): \(error.localizedDescription)" }
-            else { alert = "Save failed: \(error.localizedDescription)" }
+            if auto { toast = "Couldn't save \(baseName(path)): \(error.userMessage)" }
+            else { alert = "Save failed: \(error.userMessage)" }
         }
     }
 
@@ -1013,14 +1057,45 @@ final class Workbench: ObservableObject {
 
     // MARK: Files app ⇄ desktop
 
+    /// How far an upload has got (0…1), for the notification's bar; nil when
+    /// there's nothing to count (a download is one file).
+    @Published var transferProgress: Double?
+    private var uploadedFiles = 0
+    private var uploadTotal = 0
+
+    private func uploading(_ name: String) {
+        transfer = uploadTotal > 1 ? "Uploading \(name)… (\(uploadedFiles + 1) of \(uploadTotal))" : "Uploading \(name)…"
+    }
+
+    private func uploadedOne() {
+        uploadedFiles += 1
+        transferProgress = Double(uploadedFiles) / Double(max(uploadTotal, 1))
+    }
+
+    /// Files under `url` (1 for a file).
+    private static func fileCount(_ url: URL) -> Int {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { return 1 }
+        let e = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey])
+        return (e?.allObjects as? [URL] ?? []).filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) != true }.count
+    }
+
     /// Copies files picked in the iPad's Files app into a desktop folder.
     func upload(_ urls: [URL], to dir: String) async {
         guard let d = desktop else { return }
         var done = 0
+        uploadedFiles = 0
+        uploadTotal = urls.reduce(0) { n, url in
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            return n + Self.fileCount(url)
+        }
+        transferProgress = 0
+        defer { transferProgress = nil }
         for url in urls {
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            transfer = "Uploading \(url.lastPathComponent)…"
+            uploading(url.lastPathComponent)
             do {
                 var isDir: ObjCBool = false
                 if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
@@ -1044,8 +1119,9 @@ final class Workbench: ObservableObject {
                 }
                 try await d.writeFile(path: target, data: data)
                 done += 1
+                uploadedOne()
             } catch {
-                alert = "Upload of \(url.lastPathComponent) failed: \(error.localizedDescription)"
+                alert = "Upload of \(url.lastPathComponent) failed: \(error.userMessage)"
             }
         }
         transfer = nil
@@ -1063,9 +1139,10 @@ final class Workbench: ObservableObject {
             if (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
                 count += try await uploadFolder(item, to: target, d)
             } else {
-                transfer = "Uploading \(item.lastPathComponent)…"
+                uploading(item.lastPathComponent)
                 try await d.writeFile(path: target, data: Data(contentsOf: item))
                 count += 1
+                uploadedOne()
             }
         }
         return count
@@ -1090,7 +1167,7 @@ final class Workbench: ObservableObject {
                 try data.write(to: url, options: .atomic)
                 exportURL = url
             } catch {
-                alert = "Download failed: \(error.localizedDescription)"
+                alert = "Download failed: \(error.userMessage)"
             }
         }
     }
@@ -1122,6 +1199,7 @@ final class Workbench: ObservableObject {
         var r = recentFolders.filter { $0 != path }
         r.insert(path, at: 0)
         UserDefaults.standard.set(Array(r.prefix(10)), forKey: recentsKey)
+        UserDefaults.standard.set([machine.id, path], forKey: "lastOpened") // the home page's Continue card
         if !changed && terminals.isEmpty { newTerminal() } // same folder: no restore pending
     }
 
@@ -1193,7 +1271,7 @@ final class Workbench: ObservableObject {
             }
             explorerGeneration += 1
         } catch {
-            alert = "\(verb) failed: \(error.localizedDescription)"
+            alert = "\(verb) failed: \(error.userMessage)"
         }
     }
 

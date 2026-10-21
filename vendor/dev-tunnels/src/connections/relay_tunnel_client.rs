@@ -160,6 +160,14 @@ impl RelayTunnelClient {
             window_size: 1024 * 1024,
             preferred: russh::Preferred {
                 compression: &["none"],
+                // padcode: pinned to what this negotiated with russh's openssl
+                // backend alone. PadCode's SSH desktops turn on russh's rs-crypto
+                // too, which would offer curve25519 first, and the relay's 256-byte
+                // reply then panics the key exchange ("copy_from_slice: source
+                // slice length (256)…").
+                kex: &[russh::kex::DH_G14_SHA256],
+                key: &[russh_keys::key::RSA_SHA2_256, russh_keys::key::RSA_SHA2_512],
+                cipher: &[russh::cipher::AES_256_CTR, russh::cipher::AES_192_CTR, russh::cipher::AES_128_CTR],
                 ..russh::Preferred::DEFAULT
             },
             limits: russh::Limits {

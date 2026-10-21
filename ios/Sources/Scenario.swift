@@ -11,7 +11,24 @@ import UIKit
 // ponytail: lives in release builds (two env lookups when off); compile it out if that ever matters.
 @MainActor
 enum Scenario {
-    static let requested = ProcessInfo.processInfo.environment["PADCODE_SCENARIO"] ?? simulatorRequest()
+    private static let raw = ProcessInfo.processInfo.environment["PADCODE_SCENARIO"] ?? simulatorRequest()
+    /// `ssh=user@host:port;steps` runs the steps over SSH instead of a tunnel.
+    static let sshTarget: String? = raw.flatMap { $0.hasPrefix("ssh=") ? String($0.dropFirst(4).prefix { $0 != ";" }) : nil }
+    /// `local;steps` runs them on Linux inside PadCode.
+    static let localTarget = raw?.hasPrefix("local;") ?? false
+    static let requested: String? = raw.map {
+        sshTarget == nil && !localTarget ? $0 : String($0.split(separator: ";", maxSplits: 1).dropFirst().first ?? "")
+    }
+
+    /// The saved host for `user@host:port`, added on first use.
+    static func sshHost(_ target: String) -> SSHHost {
+        let (user, rest) = target.split(separator: "@", maxSplits: 1).map(String.init).splat
+        let (host, port) = rest.split(separator: ":", maxSplits: 1).map(String.init).splat
+        if let h = SSHHosts.shared.hosts.first(where: { $0.user == user && $0.host == host && $0.port == UInt16(port) ?? 22 }) { return h }
+        let h = SSHHost(name: host == "127.0.0.1" ? "Test sshd" : host, host: host, port: UInt16(port) ?? 22, user: user)
+        SSHHosts.shared.save(h)
+        return h
+    }
 
     /// The Simulator sometimes stops passing SIMCTL_CHILD_ variables to the app,
     /// so run-scenario.sh also leaves the steps in a one-shot file in the container.
@@ -83,17 +100,81 @@ enum Scenario {
         return await until(timeout, every: .milliseconds(1), cond) ? (CACurrentMediaTime() - t0) * 1000 : nil
     }
 
+    /// Mode "widget": the widget's own checks agree with the app's listing.
+    static func widgetEntry() async -> MachinesEntry {
+        let e = await MachineStatus.load()
+        check("widget.shared-data", WidgetData.read()?.token == Account.shared.token, "token in the shared keychain group")
+        let tunnels = Set(e.machines.filter { $0.kind == .tunnel }.map { "\($0.id) \($0.online)" })
+        check("widget.tunnels", tunnels == Set(Account.shared.machines.map { "\($0.id) \($0.online)" }),
+              "\(tunnels.count) tunnels, \(e.machines.filter { $0.kind == .tunnel && $0.online }.count) online")
+        check("widget.ssh", Set(e.machines.filter { $0.kind == .ssh }.map(\.id)) == Set(SSHHosts.shared.hosts.map(\.machine.id)),
+              e.machines.filter { $0.kind == .ssh }.map { "\($0.name) \($0.online ? "up" : "down")" }.joined(separator: ", "))
+        check("widget.local", e.machines.contains { $0.kind == .local })
+        return e
+    }
+
+    /// Mode "widget": a row's link opens that machine; again brings the same
+    /// window back; an unknown id opens nothing.
+    static func widgetLinks() async {
+        func windows(_ id: String? = nil) -> Int {
+            Set(Workbench.live.compactMap(\.wb).filter { $0.scene != nil && (id == nil || $0.machine.id == id) }.map(ObjectIdentifier.init)).count
+        }
+        guard let m = Account.shared.machines.first(where: \.online) ?? SSHHosts.shared.hosts.first?.machine else {
+            return check("widget.open-url", false, "no machine to open")
+        }
+        await UIApplication.shared.open(WidgetMachine.url(for: m.id))
+        check("widget.open-url", await until(10) { windows(m.id) == 1 }, m.name)
+        await shot("widget-opened")
+        await UIApplication.shared.open(WidgetMachine.url(for: m.id))
+        try? await Task.sleep(for: .seconds(3))
+        check("widget.same-window", windows(m.id) == 1, "\(windows(m.id)) windows for \(m.name)")
+        let total = windows()
+        await UIApplication.shared.open(URL(string: "padcode://open?machine=nope")!)
+        try? await Task.sleep(for: .seconds(2))
+        check("widget.ignores-unknown", windows() == total)
+    }
+
     static func wants(_ step: String) -> Bool {
         guard let r = requested else { return false }
         if r == "all" { return step != "switchloop" } // a profiling loop, only on request
         return r.split(separator: ",").contains(Substring(step))
     }
 
+    private static var openedSSHWindow = false
+
     static func run(_ wb: Workbench) async {
         guard requested != nil, !started else { return }
+        if requested == "home" || requested == "widget" {
+            // Home-page modes: they run in a home window. Only restored
+            // workbench windows came up, so open one.
+            guard !openedSSHWindow else { return }
+            openedSSHWindow = true
+            _ = await until(5) { wb.openWindowAction != nil }
+            return wb.openWindowAction?(id: "machines") ?? ()
+        }
+        if let target = localTarget ? LocalLinux.machine : sshTarget.map({ sshHost($0).machine }) {
+            guard wb.machine.id == target.id else {
+                // A window restored on another desktop (the user's): never test there.
+                // Open the SSH host's own window instead; its run does the test.
+                guard !openedSSHWindow else { return }
+                openedSSHWindow = true
+                log("SSHKEY \(SSHKey.publicKey)")
+                _ = await until(5) { wb.openWindowAction != nil }
+                wb.openWindowAction?(id: "workbench", value: WorkbenchTarget(machine: target))
+                return
+            }
+        }
         started = true
         setvbuf(stdout, nil, _IOLBF, 0)
         log("START \(requested!) on \(wb.machine.name)")
+        if wb.machine.isSSH, await until(20, { wb.trustPrompt != nil || wb.desktop != nil || wb.connectError != nil }),
+           let fp = wb.trustPrompt {
+            // First connection: accept the host key the way the button does.
+            check("ssh.trust-prompt", fp.hasPrefix("SHA256:"), fp)
+            await shot("ssh-trust")
+            wb.trustHostKey()
+            check("ssh.trust-saved", SSHHosts.shared.host(for: wb.machine)?.fingerprint == fp)
+        }
         guard await until(30, { wb.desktop != nil }), let d = wb.desktop, let env = wb.env else {
             check("connect", false, wb.connectError ?? "timeout")
             return log("DONE failures=\(failures + 1)")
@@ -102,8 +183,20 @@ enum Scenario {
         let root = folder ?? d.join(base: d.join(base: env.home, name: "Desktop"), name: "padcode-test")
         // Known file contents every run: earlier runs (or auto-save) may have changed them.
         holdAutoSave = true
+        try? await d.mkdirp(path: d.join(base: root, name: "src")) // a fresh machine (Linux on the iPad)
         for (name, text) in fixtures where !wants("session-check") {
             try? await d.writeFile(path: d.join(base: root, name: name), data: Data(text.utf8))
+        }
+        // Files the Mac's test folder has by hand; a fresh machine gets them once.
+        let seeds = ["hello.py": "def greet(who):\n    # TODO: find me with search\n    return f\"hi {who}\"\n\nprint(greet(\"ipad\"))\n",
+                     "crlf.txt": "line one\r\nline two\r\nTODO: windows line endings\r\n",
+                     "Cargo.toml": "[package]\nname = \"padcode-test\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n"]
+        for (name, text) in seeds where (try? await d.stat(path: d.join(base: root, name: name)))?.exists != true {
+            try? await d.writeFile(path: d.join(base: root, name: name), data: Data(text.utf8))
+        }
+        if (try? await d.stat(path: d.join(base: root, name: "big.log")))?.exists != true {
+            let lines = (1...3000).map { "\($0) INFO request handled in \($0 % 97) ms path=/api/items/\($0)" }
+            try? await d.writeFile(path: d.join(base: root, name: "big.log"), data: Data(lines.joined(separator: "\n").utf8))
         }
         wb.openFolder(root)
         _ = await until(10) { wb.restoredSession }
@@ -132,6 +225,7 @@ enum Scenario {
         if wants("history") { await history(wb, p("point.c"), p("messy.c")) }
         if wants("autosave") { await autosave(wb, d, root) }
         if wants("terminal-persist") { await terminalPersist(wb, d, root) }
+        if wants("resume") { await resume(wb, d, root) }
         if wants("lease") { await lease(wb, p("point.c")) }
         if wants("resize") { await resize(wb, p("big.log")) }
         if wants("hover") { await hover(wb, p("point.c"), p("README.md")) }
@@ -140,10 +234,23 @@ enum Scenario {
         if wants("wheel") { await wheel(wb, d, root) }
         if wants("reattach-modes") { await reattachModes(wb, d, root) }
         if wants("focus") { await focus(wb, d, root, p("point.c")) }
+        if wants("appearance") { // the light/dark reveal, caught mid-way
+            _ = await open(wb, p("point.c"))
+            let dark = UserDefaults.standard.bool(forKey: "homeDark")
+            Appearance.duration = 6
+            Appearance.flip(in: wb.scene) { UserDefaults.standard.set(!dark, forKey: "homeDark") }
+            await shot("flip-mid", wait: 1.5)
+            await shot("flip-end", wait: 6)
+            Appearance.flip(in: wb.scene) { UserDefaults.standard.set(dark, forKey: "homeDark") }
+            await shot("flip-back-mid", wait: 1.5)
+            await shot("flip-back-end", wait: 6)
+            Appearance.duration = 0.5
+        }
         if wants("terminal-window") { await terminalWindow(wb, d, root) }
         if wants("anim") { await animations(wb, p("big.log")) }
         if wants("visuals") { await visuals(wb, d, root) }
         if wants("layout") { await layoutModes(wb, p("point.c"), p("hello.py"), p("README.md")) }
+        if wants("security") { security(wb) }
         if wants("switchloop") {
             // For a profiler: 40 s of tab switches.
             let fs = ["big.log", "point.c", "messy.c", "src/main.rs", "README.md"].map(p)
@@ -358,7 +465,7 @@ enum Scenario {
             try await d.remove(path: target)
             check("files.delete-file", !((try? await d.stat(path: target).exists) ?? true))
         } catch {
-            check("files.delete-file", false, error.localizedDescription)
+            check("files.delete-file", false, error.userMessage)
         }
         let dir = d.join(base: root, name: "padcode-delete-dir-test")
         try? await d.mkdirp(path: d.join(base: dir, name: "inner"))
@@ -643,6 +750,47 @@ enum Scenario {
         try? await Task.sleep(for: .seconds(1))
         let gone = await !sockExists(wb.desktop)
         check("terminal.kill-ends-session", gone)
+    }
+
+    /// Someone else backgrounds PadCode (run-scenario's caller opens another
+    /// app on "BACKGROUND-ME", then reopens PadCode): the same shell and files
+    /// must work again. A 1 s ticker shows whether iOS really suspended us.
+    static func resume(_ wb: Workbench, _ d: Desktop, _ root: String) async {
+        wb.newTerminal(title: "resume-test")
+        guard let t = wb.terminals.last else { return check("resume", false, "no terminal") }
+        let before = d.join(base: root, name: ".pid-before"), after = d.join(base: root, name: ".pid-after")
+        try? await Task.sleep(for: .seconds(2))
+        t.send("echo $$ > '\(before)'\r")
+        try? await Task.sleep(for: .seconds(1))
+        func read(_ path: String) async -> String {
+            do { return try await String(decoding: wb.desktop!.readFile(path: path), as: UTF8.self).trimmingCharacters(in: .newlines) }
+            catch { return "error: \(error)" }
+        }
+        let pid = await read(before)
+        check("resume.read-before", Int(pid) != nil, pid)
+        var last = Date.now, gap = 0.0
+        let ticker = Task { while !Task.isCancelled { try? await Task.sleep(for: .seconds(1)); gap = max(gap, -last.timeIntervalSinceNow); last = .now } }
+        log("BACKGROUND-ME")
+        guard await until(120, { UIApplication.shared.applicationState == .background }) else { ticker.cancel(); return check("resume.backgrounded", false) }
+        let left = Date.now
+        _ = await until(900) { UIApplication.shared.applicationState == .active }
+        ticker.cancel()
+        let away = -left.timeIntervalSinceNow
+        check("resume.backgrounded", true, String(format: "away %.0f s, longest pause %.0f s (suspended if close to away)", away, gap))
+        let back = Date.now
+        var ok = false
+        for _ in 0..<60 where !ok {
+            if let d = wb.desktop, (try? await d.ping()) != nil { ok = true } else { try? await Task.sleep(for: .milliseconds(500)) }
+        }
+        check("resume.reconnect", ok, String(format: "%.1f s", -back.timeIntervalSinceNow))
+        t.send("echo $$ > '\(after)'\r")
+        try? await Task.sleep(for: .seconds(1.5))
+        let b = await read(after)
+        check("resume.same-shell", b == pid, "pid \(pid) -> \(b)")
+        await shot("resume", wait: 2)
+        try? await wb.desktop?.remove(path: before)
+        try? await wb.desktop?.remove(path: after)
+        wb.killTerminal(t.id)
     }
 
     static func sessionSetup(_ wb: Workbench, _ d: Desktop, _ a: String, _ b: String) async {
@@ -1035,6 +1183,17 @@ enum Scenario {
         try? await d.remove(path: path)
     }
 
+    /// Untrusted file content can't run code in PadCode's web views.
+    static func security(_ wb: Workbench) {
+        let evil = "# hi\n</script><script>window.pwned=1</script>\n<img src=x onerror=\"window.pwned=2\">"
+        let page = MarkdownPreview.page(markdown: evil, theme: wb.theme, fontSize: 13)
+        check("security.markdown-no-breakout", !page.contains("</script><script>window.pwned"), "raw </script> in the page")
+        let scripts = page.components(separatedBy: "<script").count - 1
+        let nonced = page.components(separatedBy: "<script nonce=").count - 1
+        check("security.markdown-csp", page.contains("script-src 'nonce-") && scripts == 2 && nonced == 2, "\(scripts) scripts, \(nonced) with the nonce")
+        check("security.link-schemes", HTMLView.Coordinator.external == ["http", "https", "mailto"])
+    }
+
     /// Zen mode, the maximized panel, and reordering tabs by dragging.
     static func layoutModes(_ wb: Workbench, _ a: String, _ b: String, _ c: String) async {
         for p in [a, b, c] { _ = await open(wb, p) }
@@ -1060,7 +1219,8 @@ enum Scenario {
         wb.moveTab(c, onto: a, in: g)
         let moved = wb.groups[g].tabs
         wb.moveTab(a, onto: c, in: g)
-        check("layout.tab-reorder", moved.firstIndex(of: c) == before.firstIndex(of: a) && wb.groups[g].tabs.firstIndex(of: a)! < wb.groups[g].tabs.firstIndex(of: c)!,
+        // Each dragged tab takes its target's place (whichever side it came from).
+        check("layout.tab-reorder", moved.firstIndex(of: c) == before.firstIndex(of: a) && wb.groups[g].tabs.firstIndex(of: a) == moved.firstIndex(of: c),
               "\(moved.map { wb.baseName($0) }) then \(wb.groups[g].tabs.map { wb.baseName($0) })")
         // A hidden terminal keeps its old, wider size; that mustn't widen the panel
         // (it pushed the window sideways: Explorer cut off, panel past the edge).
@@ -1447,4 +1607,9 @@ extension AppSettings {
         defer { trimTrailingWhitespace = t; insertFinalNewline = n }
         return cleanUp(text)
     }
+}
+
+private extension Array where Element == String {
+    /// ["a", "b"] → ("a", "b"); a missing second part is "".
+    var splat: (String, String) { (first ?? "", count > 1 ? self[1] : "") }
 }

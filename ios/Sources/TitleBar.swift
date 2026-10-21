@@ -7,13 +7,17 @@ struct TitleBar<Leading: View, Trailing: View>: View {
     let theme: VSTheme
     let title: String
     var onCommandCenter: (() -> Void)?
+    /// When set, the command center is a search field (the home page's machine filter), `title` its prompt.
+    var filter: Binding<String>? = nil
+    @Environment(\.home) private var h
+    @FocusState private var searching: Bool
     @ViewBuilder var leading: Leading
     @ViewBuilder var trailing: Trailing
 
     var body: some View {
         let t = theme
         ZStack {
-            HStack(spacing: 12) {
+            HStack(spacing: 4) {
                 leading
                 Spacer()
                 trailing
@@ -22,26 +26,61 @@ struct TitleBar<Leading: View, Trailing: View>: View {
             commandCenter(t)
         }
         .buttonStyle(.plain)
-        .foregroundStyle(t.titleBarFg)
-        .frame(height: 38)
-        .background(t.canvasBg)
+        .foregroundStyle(h.ink)
+        .frame(height: 44)
+        // Straight on the canvas, no bar: the command center is the one object, the actions are quiet icons.
+        .padding(.horizontal, 8).padding(.top, 4).padding(.bottom, 4)
     }
 
+    @ViewBuilder
     private func commandCenter(_ t: VSTheme) -> some View {
+        if let filter { searchField(filter) } else { commandButton(t) }
+    }
+
+    private func searchField(_ text: Binding<String>) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass").font(.system(size: 12, weight: .semibold))
+            TextField("", text: text, prompt: Text(title).foregroundStyle(h.muted))
+                .textFieldStyle(.plain).font(.system(size: 13, weight: .medium)).foregroundStyle(h.ink)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                .focused($searching)
+                .onKeyPress(.escape) { text.wrappedValue = ""; searching = false; return .handled }
+            if !text.wrappedValue.isEmpty {
+                Button { text.wrappedValue = "" } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 13)) }
+                    .buttonStyle(PressDown()).tip("Clear")
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
+        }
+        .foregroundStyle(searching ? h.ink : h.muted)
+        .frame(maxWidth: 480)
+        .frame(height: 32)
+        .padding(.horizontal, 14)
+        .background(h.card, in: Capsule())
+        .overlay(Capsule().strokeBorder(searching ? h.green : h.border, lineWidth: searching ? 1.5 : 1))
+        .shadow(color: .black.opacity((searching ? 0.08 : 0.05) * h.shadow), radius: searching ? 10 : 6, y: 3)
+        .contentShape(Capsule())
+        .onTapGesture { searching = true }
+        .animation(Motion.pop, value: searching)
+        .animation(Motion.quick, value: text.wrappedValue.isEmpty)
+        .padding(.horizontal, 160) // keep clear of the side actions
+    }
+
+    private func commandButton(_ t: VSTheme) -> some View {
         Button { onCommandCenter?() } label: {
             Hovering { on in
                 let hover = on && onCommandCenter != nil
                 HStack(spacing: 7) {
                     Image(systemName: "magnifyingglass").font(.system(size: 12, weight: .semibold))
                         .symbolEffect(.bounce, value: hover)
-                    Text(title).font(.system(size: 12.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                    Text(title).font(.system(size: 13, weight: .medium)).lineLimit(1).truncationMode(.middle)
                 }
-                .foregroundStyle(t.titleBarFg.opacity(hover ? 1 : 0.78))
+                .foregroundStyle(hover ? h.ink : h.muted)
                 .frame(maxWidth: 480)
-                .frame(height: 28)
-                .padding(.horizontal, 12)
-                .background(hover ? t.raised : t.hoverFill, in: Capsule())
-                .overlay(Capsule().strokeBorder(t.cardBorder))
+                .frame(height: 32)
+                .padding(.horizontal, 14)
+                .background(h.card, in: Capsule())
+                .overlay(Capsule().strokeBorder(hover ? h.green : h.border))
+                .shadow(color: .black.opacity((hover ? 0.08 : 0.05) * h.shadow), radius: hover ? 10 : 6, y: 3)
                 .scaleEffect(hover ? 1.015 : 1)
                 .animation(Motion.pop, value: hover)
             }
@@ -55,16 +94,16 @@ struct TitleBar<Leading: View, Trailing: View>: View {
 
 /// A title-bar icon that opens a menu.
 struct TitleBarMenu<Items: View>: View {
-    let icon: Codicon
+    let symbol: String
     let label: String
     @ViewBuilder var items: Items
 
     var body: some View {
         Menu { items } label: {
-            CodiconView(icon: icon, size: 16)
-                .opacity(0.75)
-                .frame(width: 28, height: 28)
-                .hoverBackground(Color(white: 0.5, opacity: 0.3), cornerRadius: 5)
+            Image(systemName: symbol).font(.system(size: 15, weight: .regular))
+                .opacity(0.72)
+                .frame(width: 36, height: 36)
+                .hoverBackground(Color(white: 0.5, opacity: 0.2), cornerRadius: 6)
                 .contentShape(Rectangle())
         }
         .hoverEffectDisabled()
@@ -92,7 +131,7 @@ struct TitleBarButton: View {
                 }
             }
             .opacity(active ? 1 : 0.72)
-            .frame(width: 30, height: 30)
+            .frame(width: 36, height: 36)
             .animation(Motion.pop, value: symbol)
         }
         .buttonStyle(ToolbarButtonStyle(padding: 0))

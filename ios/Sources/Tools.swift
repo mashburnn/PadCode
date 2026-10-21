@@ -205,7 +205,7 @@ extension Workbench {
                 }
                 active = tab
             } catch {
-                alert = "Couldn't forward port \(port): \(error.localizedDescription)"
+                alert = "Couldn't forward port \(port): \(error.userMessage)"
             }
         }
     }
@@ -214,6 +214,7 @@ extension Workbench {
 /// VS Code's PORTS view: what's listening on the desktop, one tap to preview.
 struct PortsView: View {
     @EnvironmentObject var wb: Workbench
+    @Environment(\.home) private var h
     @State private var ports: [PortInfo] = []
     @State private var loaded = false
     @State private var manual = ""
@@ -223,9 +224,11 @@ struct PortsView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 Text("Forward a port:").font(.system(size: 12)).foregroundStyle(t.descriptionFg)
-                TextField("3000", text: $manual)
+                TextField("", text: $manual, prompt: t.prompt("3000"))
                     .textFieldStyle(.plain).font(.system(size: 12)).keyboardType(.numberPad)
-                    .padding(4).frame(width: 70).background(t.inputBg)
+                    .padding(.horizontal, 8).frame(width: 76, height: 26)
+                    .background(t.inputBg, in: RoundedRectangle(cornerRadius: 6, style: .continuous)).foregroundStyle(t.inputFg)
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(t.inputBorder))
                     .onSubmit { if let p = UInt16(manual) { wb.preview(port: p) } }
                 Button("Preview") { if let p = UInt16(manual) { wb.preview(port: p) } }
                     .font(.system(size: 12)).disabled(UInt16(manual) == nil)
@@ -233,14 +236,23 @@ struct PortsView: View {
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
             if loaded && ports.isEmpty {
-                Text("Nothing is listening on \(wb.machine.name). Start a dev server (npm run dev, python3 -m http.server…) and it shows up here.")
-                    .font(.system(size: 12)).foregroundStyle(t.descriptionFg).padding(12)
+                VStack(spacing: 8) {
+                    Image(systemName: "antenna.radiowaves.left.and.right.slash").font(.system(size: 28, weight: .light))
+                        .foregroundStyle(t.descriptionFg.opacity(0.6)).symbolBounceIn()
+                    Text("Nothing is listening on \(wb.machine.name). Start a dev server (npm run dev, python3 -m http.server…) and it shows up here.")
+                        .font(.system(size: 12)).foregroundStyle(t.descriptionFg).multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Open a Terminal") { wb.newTerminal() }
+                        .buttonStyle(PillButton()).font(.system(size: 12, weight: .semibold)).padding(.top, 2)
+                }
+                .frame(maxWidth: 420).frame(maxWidth: .infinity).padding(.top, 24)
+                .transition(.blurFade)
             }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(ports, id: \.port) { p in
                         HStack(spacing: 10) {
-                            Circle().fill(wb.forwards[p.port] != nil ? SwiftUI.Color.green : SwiftUI.Color.gray).frame(width: 7, height: 7)
+                            Circle().fill(wb.forwards[p.port] != nil ? h.green : Color.gray.opacity(0.7)).frame(width: 7, height: 7)
                             Text(verbatim: "\(p.port)").font(.custom("Menlo", size: 13)).frame(width: 60, alignment: .leading)
                             Text(p.process.isEmpty ? "—" : p.process).font(.system(size: 13)).foregroundStyle(t.descriptionFg)
                             Spacer()
@@ -280,17 +292,18 @@ struct BrowserView: View {
         let port = file.path.replacingOccurrences(of: "port:", with: "")
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Button { model.web.goBack() } label: { CodiconView(icon: .arrowLeft, size: 15) }.disabled(!model.canGoBack)
-                Button { model.web.goForward() } label: { CodiconView(icon: .arrowRight, size: 15) }.disabled(!model.canGoForward)
-                Button { model.web.reload() } label: { CodiconView(icon: .refresh, size: 15) }
+                Button { model.web.goBack() } label: { CodiconView(icon: .arrowLeft, size: 15) }.disabled(!model.canGoBack).tip("Back")
+                Button { model.web.goForward() } label: { CodiconView(icon: .arrowRight, size: 15) }.disabled(!model.canGoForward).tip("Forward")
+                Button { model.web.reload() } label: { CodiconView(icon: .refresh, size: 15) }.tip("Reload")
                 HStack(spacing: 4) {
                     Text(verbatim: "localhost:\(port)").font(.system(size: 12)).foregroundStyle(t.descriptionFg)
-                    TextField("/", text: $address)
+                    TextField("", text: $address, prompt: t.prompt("/"))
                         .textFieldStyle(.plain).font(.system(size: 12))
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .onSubmit { wb.preview(port: UInt16(port) ?? 0, path: address.hasPrefix("/") ? address : "/" + address) }
                 }
-                .padding(.horizontal, 6).frame(height: 24).background(t.inputBg).clipShape(RoundedRectangle(cornerRadius: 4))
+                .padding(.horizontal, 6).frame(height: 24).background(t.inputBg).foregroundStyle(t.inputFg).clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(t.inputBorder))
                 if model.loading { ProgressView().scaleEffect(0.6) }
             }
             .buttonStyle(.plain).foregroundStyle(t.tabActiveFg)

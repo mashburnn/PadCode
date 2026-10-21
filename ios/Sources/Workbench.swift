@@ -9,10 +9,12 @@ struct WorkbenchView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.scenePhase) private var phase
     @Environment(\.horizontalSizeClass) private var sizeClass
-    @State private var sidebarWidth: CGFloat = 280
-    @State private var panelHeight: CGFloat = 260
+    @AppStorage("sidebarWidth") private var sidebarWidth: Double = 280
+    @AppStorage("panelHeight") private var panelHeight: Double = 260
     /// Space between panels, and around them.
-    static let gap: CGFloat = 6
+    static let gap: CGFloat = 8 // one spacing unit: between panels, around them, under the title bar
+    @AppStorage("homeDark") private var homeDark = false
+    private var h: HomeStyle { HomeStyle(dark: homeDark) }
 
     var body: some View {
         let t = wb.theme
@@ -22,7 +24,7 @@ struct WorkbenchView: View {
             }) {
                 EmptyView()
             } trailing: {
-                TitleBarMenu(icon: .multipleWindows, label: "New Window") {
+                TitleBarMenu(symbol: "macwindow.on.rectangle", label: "New Window") {
                     Button { wb.newWindow() } label: { Label("New Window  ⇧⌘N", systemImage: "macwindow.badge.plus") }
                     Button { wb.openInNewWindow(nil) } label: { Label("New Window on \(wb.machine.name)", systemImage: "desktopcomputer") }
                     if !wb.root.isEmpty {
@@ -43,6 +45,9 @@ struct WorkbenchView: View {
                                label: "Toggle Panel", active: wb.panelOpen) {
                     wb.togglePanel()
                 }
+                TitleBarButton(symbol: homeDark ? "sun.max" : "moon", label: homeDark ? "Light Canvas" : "Dark Canvas") {
+                    Appearance.toggle(in: wb.scene)
+                }
             }
             // Panels float on the canvas; the gaps between them are the resize handles.
             HStack(spacing: 0) {
@@ -58,46 +63,56 @@ struct WorkbenchView: View {
                         case .outline: OutlineView()
                         }
                     }
+                    .transition(.blurFade) // swapping views inside the card
                     .frame(width: sidebarWidth)
                     .card(t, fill: t.sideBarBg)
+                    .overlay { loadingEdges(t) }
                     .transition(.move(edge: .leading).combined(with: .opacity))
-                    Sash(axis: .vertical, value: $sidebarWidth, range: 170...600)
+                    Sash(axis: .vertical, value: $sidebarWidth, range: 170...600, reset: 280) { wb.toggleSidebar() }
                 }
                 VStack(spacing: 0) {
                     let maximized = wb.panelOpen && wb.panelMaximized
                     if !maximized {
                         // Zen mode: a centered column, like a page.
                         EditorArea()
+                            .overlay { loadingEdges(t) }
                             .frame(maxWidth: wb.zen ? 1040 : .infinity)
                             .frame(maxWidth: .infinity)
                     }
                     if wb.panelOpen {
-                        if !maximized { Sash(axis: .horizontal, value: $panelHeight, range: 80...900, sign: -1) }
+                        if !maximized { Sash(axis: .horizontal, value: $panelHeight, range: 80...900, sign: -1, reset: 260) { wb.hidePanel() } }
                         // Slides at its full height: the terminal isn't resized frame by frame.
                         // No fade: fading the terminal (a UIKit view) renders it offscreen every frame.
                         TerminalPanel()
                             .frame(height: maximized ? nil : panelHeight)
                             .frame(maxHeight: maximized ? .infinity : nil)
                             .card(t, fill: t.panelBg)
+                            .overlay { loadingEdges(t) }
                             .transition(.move(edge: .bottom))
                     }
                 }
             }
             .padding(.leading, wb.zen ? Self.gap : 0)
-            .padding(.trailing, Self.gap)
+            .padding(.trailing, Self.gap) // flush with the title pill
             .padding(.bottom, wb.zen ? Self.gap : 0)
+            // Every way of showing a view or the panel (menus, commands, a new terminal) slides it in.
+            .animation(Motion.layout, value: wb.side)
+            .animation(Motion.layout, value: wb.panelOpen)
             if !wb.zen {
                 StatusBar().transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .avoidKeyboard()
-        .background(t.canvasBg)
+        .background(DotCanvas())
+        .environment(\.home, h)
+        .onChange(of: homeDark, initial: true) { wb.lightCanvas = !homeDark } // every window follows the toggle
         .overlay(alignment: .top) {
             // Pickers drop in under the title bar over a light scrim.
-            let open = [wb.quickOpen, wb.palette, wb.symbolPicker, wb.workspaceSymbolPicker, wb.taskPicker, wb.gotoLine]
+            let open = [wb.quickOpen, wb.palette, wb.symbolPicker, wb.workspaceSymbolPicker, wb.taskPicker, wb.gotoLine,
+                        wb.picker && wb.desktop != nil]
             ZStack(alignment: .top) {
                 if open.contains(true) {
-                    Color.black.opacity(t.isDark ? 0.18 : 0.08).ignoresSafeArea().allowsHitTesting(false)
+                    Color.black.opacity(t.isDark ? 0.2 : 0.12).ignoresSafeArea().allowsHitTesting(false)
                         .transition(.opacity)
                 }
                 Group {
@@ -107,17 +122,22 @@ struct WorkbenchView: View {
                     if wb.workspaceSymbolPicker { WorkspaceSymbolPicker() }
                     if wb.taskPicker { TaskPicker() }
                     if wb.gotoLine { GotoLinePicker() }
+                    if wb.picker && wb.desktop != nil { FolderPicker() }
                 }
                 .transition(.pop())
             }
             .animation(Motion.popup, value: open)
-            if wb.picker && wb.desktop != nil { FolderPicker() }
             LanguageOverlays()
         }
         .overlay {
-            if wb.desktop == nil { ConnectingOverlay() }
+            ZStack {
+                if wb.desktop == nil {
+                    h.canvas.opacity(0.55).ignoresSafeArea().transition(.opacity)
+                    ConnectingOverlay()
+                }
+            }
+            .animation(Motion.popup, value: wb.desktop == nil)
         }
-        .animation(Motion.popup, value: wb.desktop == nil)
         .overlay(alignment: .bottomTrailing) { TransferToast(wb: wb) }
         .environmentObject(wb)
         .environmentObject(wb.languages)
@@ -125,8 +145,8 @@ struct WorkbenchView: View {
         .focusedSceneObject(wb) // the menu bar acts on this window
         .preferredColorScheme(t.isDark ? .dark : .light)
         .statusBarHidden() // see App.swift
-        .persistentSystemOverlays(.hidden)
         .task {
+            if Scenario.requested == "skeletons", wb.desktop == nil { await Scenario.shot("connecting", wait: 0.5) }
             if wb.desktop == nil { await wb.connect() }
             if Scenario.requested != nil { await Scenario.run(wb) }
         }
@@ -188,9 +208,18 @@ struct WorkbenchView: View {
 }
 
 extension WorkbenchView {
+    /// While the desktop connects, the panels' outlines catch the skeleton shimmer.
+    @ViewBuilder
+    func loadingEdges(_ t: VSTheme) -> some View {
+        if wb.desktop == nil && wb.connectError == nil && wb.trustPrompt == nil {
+            SkeletonOutline(radius: 16, theme: t).transition(.opacity)
+        }
+    }
+
     /// Like VS Code: "folder [Tunnel: machine]", or just the machine when no folder is open.
     var commandCenterTitle: String {
-        wb.root.isEmpty ? "\(wb.machine.name) [Tunnel]" : "\(wb.baseName(wb.root)) [Tunnel: \(wb.machine.name)]"
+        let via = wb.machine.isLocal ? "iPad" : wb.machine.isSSH ? "SSH" : "Tunnel"
+        return wb.root.isEmpty ? "\(wb.machine.name) [\(via)]" : "\(wb.baseName(wb.root)) [\(via): \(wb.machine.name)]"
     }
 }
 
@@ -200,9 +229,13 @@ extension WorkbenchView {
 private struct Sash: View {
     enum Axis { case vertical, horizontal }
     let axis: Axis
-    @Binding var value: CGFloat
+    @Binding var value: Double
     let range: ClosedRange<CGFloat>
     var sign: CGFloat = 1
+    /// Double-tap puts the size back to this.
+    let reset: CGFloat
+    /// Dragging well past the minimum hides the panel instead of pinning it there.
+    let collapse: () -> Void
     @EnvironmentObject var wb: Workbench
     @State private var start: CGFloat = 0
     @State private var active = false
@@ -219,9 +252,11 @@ private struct Sash: View {
                     .allowsHitTesting(false)
             }
             .overlay {
-                SashHandle(vertical: vertical, active: $active, began: { start = value }) { t in
-                    value = min(max(start + sign * t, range.lowerBound), range.upperBound)
-                }
+                SashHandle(vertical: vertical, active: $active, began: { start = value }, moved: { t in
+                    let want = start + sign * t
+                    if want < range.lowerBound - 60 { collapse(); return }
+                    value = min(max(want, range.lowerBound), range.upperBound)
+                }, reset: { withAnimation(Motion.layout) { value = reset } })
                 .frame(width: vertical ? 12 : nil, height: vertical ? nil : 12)
             }
             .zIndex(1)
@@ -234,12 +269,14 @@ private struct SashHandle: UIViewRepresentable {
     let began: () -> Void
     /// Distance moved since the drag began.
     let moved: (CGFloat) -> Void
+    let reset: () -> Void
 
     func makeUIView(context: Context) -> SashView { SashView() }
     func updateUIView(_ v: SashView, context: Context) {
         v.vertical = vertical
         v.began = began
         v.moved = moved
+        v.reset = reset
         v.activeChanged = { active = $0 }
     }
 }
@@ -248,6 +285,7 @@ final class SashView: UIView, UIPointerInteractionDelegate {
     var vertical = true
     var began: () -> Void = {}
     var moved: (CGFloat) -> Void = { _ in }
+    var reset: () -> Void = {}
     var activeChanged: (Bool) -> Void = { _ in }
     private var hovering = false { didSet { activeChanged(hovering || dragging) } }
     private var dragging = false { didSet { activeChanged(hovering || dragging) } }
@@ -255,8 +293,12 @@ final class SashView: UIView, UIPointerInteractionDelegate {
     override init(frame: CGRect) {
         super.init(frame: frame)
         addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(pan)))
+        let twice = UITapGestureRecognizer(target: self, action: #selector(doubleTap))
+        twice.numberOfTapsRequired = 2
+        addGestureRecognizer(twice)
         addInteraction(UIPointerInteraction(delegate: self))
     }
+    @objc private func doubleTap() { reset() }
     required init?(coder: NSCoder) { fatalError() }
 
     // Window space: the sash moves with the finger, so its own coordinates
@@ -292,6 +334,7 @@ final class SashView: UIView, UIPointerInteractionDelegate {
 /// that slides between them; its symbol bounces when picked.
 private struct ActivityBar: View {
     @EnvironmentObject var wb: Workbench
+    @Environment(\.home) private var h
     @Namespace private var indicator
     var body: some View {
         let t = wb.theme
@@ -309,8 +352,8 @@ private struct ActivityBar: View {
                 Button("Sign Out", role: .destructive) { Account.shared.signOut() }
             } label: {
                 Hovering { on in
-                    Image(systemName: "gearshape").font(.system(size: 19))
-                        .foregroundStyle(t.titleBarFg.opacity(on ? 0.95 : 0.55))
+                    Image(systemName: "gearshape").font(.system(size: 18))
+                        .foregroundStyle(h.muted.opacity(on ? 1 : 0.8))
                         .rotationEffect(.degrees(on ? 45 : 0))
                         .animation(Motion.pop, value: on)
                         .frame(width: 40, height: 40)
@@ -321,7 +364,6 @@ private struct ActivityBar: View {
         }
         .padding(.vertical, 4)
         .frame(width: 52)
-        .background(t.canvasBg)
     }
 }
 
@@ -330,10 +372,10 @@ private struct ActivityItem: View {
     let view: SideView
     let indicator: Namespace.ID
     @EnvironmentObject var wb: Workbench
+    @Environment(\.home) private var h
     @State private var bounce = 0
 
     var body: some View {
-        let t = wb.theme
         let active = wb.side == view
         Button {
             bounce += 1
@@ -342,17 +384,19 @@ private struct ActivityItem: View {
             Hovering { on in
                 Image(systemName: symbol).font(.system(size: 18, weight: active ? .semibold : .regular))
                     .symbolEffect(.bounce.down, value: bounce)
-                    .foregroundStyle(active ? t.accent : t.titleBarFg.opacity(on ? 0.95 : 0.55))
+                    .foregroundStyle(active ? h.ink : h.muted.opacity(on ? 1 : 0.8))
                     .frame(width: 40, height: 40)
                     .background {
                         if active {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous).fill(t.accent.opacity(0.16))
+                            RoundedRectangle(cornerRadius: 10, style: .continuous).fill(h.card)
+                                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(h.border))
+                                .shadow(color: .black.opacity(0.05 * h.shadow), radius: 6, y: 2)
                                 .matchedGeometryEffect(id: "active", in: indicator)
                         } else if on {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous).fill(t.hoverFill)
+                            RoundedRectangle(cornerRadius: 10, style: .continuous).fill(h.chip)
                         }
                     }
-                    .animation(.easeOut(duration: 0.12), value: on)
+                    .animation(Motion.hover, value: on)
             }
         }
         .buttonStyle(PressDown(scale: 0.9))
@@ -388,7 +432,7 @@ private struct ProblemCounts: View {
             .contentTransition(.numericText())
             .animation(Motion.pop, value: c.errors + c.warnings)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressDown())
         .hoverEffectDisabled()
     }
 }
@@ -448,6 +492,7 @@ private struct Spinner: View {
 
 private struct StatusBar: View {
     @EnvironmentObject var wb: Workbench
+    @Environment(\.home) private var h
     var body: some View {
         let t = wb.theme
         HStack(spacing: 0) {
@@ -458,17 +503,19 @@ private struct StatusBar: View {
                 Hovering { on in
                     HStack(spacing: 5) {
                         StatusDot(online: wb.desktop != nil)
-                        Text(wb.machine.name).font(.system(size: 11.5, weight: .medium))
+                        Text(wb.machine.name).font(.system(size: 12, weight: .medium))
                     }
                     .padding(.horizontal, 9).frame(height: 20)
-                    .background(on ? t.raised : t.hoverFill, in: Capsule())
-                    .overlay(Capsule().strokeBorder(t.cardBorder))
+                    // On the canvas, so the canvas's own chip colours (not the editor theme's).
+                    .background(on ? h.card : h.chip, in: Capsule())
+                    .overlay(Capsule().strokeBorder(h.border))
+                    .animation(Motion.hover, value: on)
                 }
             }
             .buttonStyle(PressDown())
             .hoverEffectDisabled()
             .padding(.leading, 52 + 2) // lines up with the panels, past the activity bar
-            .help("Remote Tunnel: \(wb.machine.name)")
+            .help("\(wb.machine.isLocal ? "Linux on this iPad" : wb.machine.isSSH ? "SSH" : "Remote Tunnel"): \(wb.machine.name)")
             if !wb.osLabel.isEmpty {
                 Text(wb.osLabel).font(.system(size: 12)).padding(.horizontal, 8)
             }
@@ -480,7 +527,7 @@ private struct StatusBar: View {
                         CursorPosition().padding(.horizontal, 6).frame(maxHeight: .infinity)
                             .hoverBackground(t.statusItemHoverBg)
                     }
-                    .buttonStyle(.plain).hoverEffectDisabled().padding(.horizontal, -6)
+                    .buttonStyle(PressDown()).hoverEffectDisabled().padding(.horizontal, -6)
                     .help("Go to Line/Column (⌃G)")
                     Text("Spaces: \(wb.tabSize)")
                     Text("UTF-8")
@@ -491,10 +538,9 @@ private struct StatusBar: View {
             }
             CodiconView(icon: .bell, size: 14).padding(.horizontal, 8)
         }
-        .foregroundStyle(t.titleBarFg.opacity(0.7))
+        .foregroundStyle(h.ink.opacity(0.65))
         .frame(height: 26)
         .padding(.trailing, WorkbenchView.gap)
-        .background(t.canvasBg)
     }
 
     private func closeWindow() {
@@ -506,32 +552,56 @@ private struct StatusBar: View {
 
 struct ConnectingOverlay: View {
     @EnvironmentObject var wb: Workbench
+    @Environment(\.home) private var h
     var body: some View {
         let t = wb.theme
         VStack(spacing: 14) {
-            if let err = wb.connectError {
-                Image(systemName: "bolt.horizontal.circle").font(.system(size: 40, weight: .light))
-                    .foregroundStyle(t.errorFg)
+            if let fp = wb.trustPrompt {
+                // First SSH connection: the user vouches for the host key once.
+                Chip("First connection", dot: h.green)
+                Image(systemName: "lock.shield").font(.system(size: 38, weight: .light))
+                    .foregroundStyle(h.ink)
+                    .symbolEffect(.bounce, value: fp)
+                Text(wb.machine.name).font(.system(size: 18, weight: .bold, design: .rounded))
+                Text("Check that this is the machine's host key, then trust it. PadCode refuses to connect if it ever changes.")
+                    .font(.system(size: 13)).foregroundStyle(h.muted).multilineTextAlignment(.center)
+                Text(fp).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                    .padding(.horizontal, 10).padding(.vertical, 7)
+                    .background(h.chip, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                Text("On the machine: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub")
+                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(h.muted).textSelection(.enabled)
+                HStack(spacing: 14) {
+                    Button("Cancel") {
+                        wb.trustPrompt = nil
+                        wb.connectError = "Not connected: the host key wasn't trusted."
+                    }
+                    .buttonStyle(LinkButtonStyle(hover: h.green)).foregroundStyle(h.muted)
+                    PrimaryButton(title: "Trust and Connect", theme: t) { wb.trustHostKey() }
+                }
+            } else if let err = wb.connectError {
+                Chip("Not connected", dot: h.red)
+                Image(systemName: "bolt.horizontal.circle").font(.system(size: 38, weight: .light))
+                    .foregroundStyle(h.ink)
                     .symbolEffect(.bounce, value: err)
-                Text("Could not connect to \(wb.machine.name)").font(.headline)
-                Text(err).font(.system(size: 13)).foregroundStyle(t.descriptionFg).multilineTextAlignment(.center)
-                Button("Retry") { Task { await wb.connect() } }
-                    .buttonStyle(.borderedProminent).tint(t.buttonBg).buttonBorderShape(.capsule)
+                Text(wb.machine.name).font(.system(size: 18, weight: .bold, design: .rounded))
+                Text(err).font(.system(size: 13)).foregroundStyle(h.muted).multilineTextAlignment(.center)
+                PrimaryButton(title: "Retry", theme: t) { Task { await wb.connect() } }
             } else {
                 // Waves going out while the tunnel comes up.
-                Image(systemName: "antenna.radiowaves.left.and.right").font(.system(size: 36, weight: .light))
-                    .foregroundStyle(t.accent)
+                Image(systemName: "antenna.radiowaves.left.and.right").font(.system(size: 38, weight: .light))
+                    .foregroundStyle(h.ink)
                     .symbolEffect(.variableColor.iterative.reversing, isActive: true)
-                Text(wb.status).font(.system(size: 13, weight: .medium)).foregroundStyle(t.descriptionFg)
+                Text(wb.machine.name).font(.system(size: 18, weight: .bold, design: .rounded))
+                Text(wb.status).font(.system(size: 13, weight: .medium)).foregroundStyle(h.muted)
                     .contentTransition(.opacity)
-                    .animation(.easeInOut(duration: 0.2), value: wb.status)
+                    .animation(Motion.quick, value: wb.status)
             }
         }
         .padding(32).frame(maxWidth: 420)
-        .glass(t.quickInputBg, radius: 22)
-        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(t.widgetBorder))
-        .shadow(color: .black.opacity(t.isDark ? 0.4 : 0.15), radius: 30, y: 12)
-        .foregroundStyle(t.quickInputFg)
+        .background(h.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous)) // the panels' radius
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(h.border))
+        .shadow(color: .black.opacity(h.dark ? 0.4 : 0.15), radius: 28, y: 12) // as high as the pickers
+        .foregroundStyle(h.ink)
         .transition(.pop(from: .center))
     }
 }
@@ -555,9 +625,9 @@ struct QuickPickList<Item: Identifiable>: View {
         let t = wb.theme
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").font(.system(size: 14, weight: .medium))
+                Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium))
                     .foregroundStyle(t.accent)
-                TextField(placeholder, text: $query)
+                TextField("", text: $query, prompt: t.prompt(placeholder))
                     .textFieldStyle(.plain).font(.system(size: 15))
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .foregroundStyle(t.inputFg)
@@ -600,9 +670,7 @@ struct QuickPickList<Item: Identifiable>: View {
             .animation(Motion.layout, value: min(items.count, 16))
         }
         .frame(width: 640)
-        .glass(t.quickInputBg, radius: 16)
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(t.widgetBorder))
-        .shadow(color: .black.opacity(t.isDark ? 0.4 : 0.15), radius: 30, y: 14)
+        .floating(t, t.quickInputBg, radius: 16, lifted: true)
         // Centered in the window, just under the title bar, like VS Code;
         // tapping anywhere else dismisses.
         .padding(.top, 40)
@@ -787,8 +855,12 @@ struct Command: Identifiable {
             wb.panelTab = .problems
         },
         Command(title: "Developer: Restart Language Servers", keys: "") { wb in Task { await wb.languages.restart(stopOld: true) } },
-        Command(title: "Preferences: Color Theme: GitHub Dark Dimmed", keys: "") { $0.theme = .bundled("github-dark-dimmed") },
-        Command(title: "Preferences: Color Theme: Dark Modern", keys: "") { $0.theme = .bundled("dark-modern") },
+        Command(title: "Preferences: Color Theme: GitHub Dark Dimmed", keys: "") { $0.chosenTheme = .bundled("github-dark-dimmed") },
+        Command(title: "Preferences: Color Theme: Dark Modern", keys: "") { $0.chosenTheme = .bundled("dark-modern") },
+        Command(title: "View: Toggle Dark Canvas", keys: "⌃⌘L") { wb in
+            // After the palette has gone, so the reveal doesn't carry it.
+            Task { try? await Task.sleep(for: .milliseconds(300)); Appearance.toggle(in: wb.scene) }
+        },
         Command(title: "View: Increase Font Size", keys: "⌘=") { $0.fontSize = min($0.fontSize + 1, 32) },
         Command(title: "View: Decrease Font Size", keys: "⌘-") { $0.fontSize = max($0.fontSize - 1, 8) },
     ]

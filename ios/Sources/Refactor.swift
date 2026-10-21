@@ -52,7 +52,7 @@ extension Languages {
                 let n = await applyFileEdits(files)
                 wb?.toast = "Renamed to '\(newName)' in \(n) file\(n == 1 ? "" : "s")"
             } catch {
-                wb?.alert = "Rename failed: \(error.localizedDescription)"
+                wb?.alert = "Rename failed: \(error.userMessage)"
             }
         }
     }
@@ -110,7 +110,7 @@ extension Languages {
             do {
                 _ = await applyFileEdits(try await s.runCodeAction(raw: a.raw))
             } catch {
-                wb?.alert = "\(a.title) failed: \(error.localizedDescription)"
+                wb?.alert = "\(a.title) failed: \(error.userMessage)"
             }
         }
     }
@@ -254,14 +254,11 @@ struct SignaturePopup: View {
                         Text(doc).font(.system(size: 12)).foregroundStyle(t.descriptionFg).lineLimit(3)
                     }
                 }
-                .padding(.horizontal, 8).padding(.vertical, 5)
+                .padding(.horizontal, 10).padding(.vertical, 6)
                 .frame(maxWidth: 560, alignment: .leading)
                 .fixedSize()
                 .foregroundStyle(t.ui("editorHoverWidget.foreground", "editor.foreground", default: "#cccccc"))
-                .background(t.ui("editorHoverWidget.background", "editorWidget.background", default: "#252526"))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(t.widgetBorder))
-                .shadow(color: .black.opacity(t.isDark ? 0.3 : 0.1), radius: 8, y: 3)
+                .floating(t, t.ui("editorHoverWidget.background", "editorWidget.background", default: "#252526"), solid: true) // follows typing
                 .offset(x: max(s.anchor.minX - origin.x - 12, 4), y: max(s.anchor.minY - origin.y - 34 - (s.sig.doc == nil ? 0 : 20), 2))
                 .onTapGesture { languages.signature = nil }
             }

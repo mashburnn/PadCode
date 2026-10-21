@@ -73,11 +73,18 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var desktopThemes: [String] = []
     @State private var loadingThemes = false
+    @AppStorage("homeDark") private var homeDark = false
+    @AppStorage("canvasFollowsSystem") private var followsSystem = true
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("Appearance") {
+                    Picker("Canvas", selection: canvasBinding) {
+                        Text("System").tag(0)
+                        Text("Light").tag(1)
+                        Text("Dark").tag(2)
+                    }
                     Picker("Color Theme", selection: themeBinding) {
                         Text("Same as \(wb.machine.name)'s VS Code").tag(AppSettings.desktopTheme)
                         ForEach(AppSettings.bundledThemes, id: \.0) { Text($0.1).tag($0.0) }
@@ -127,6 +134,15 @@ struct SettingsView: View {
         .onChange(of: settings.fontSize) { wb.applySettings() }
         .onChange(of: settings.tabSize) { wb.applySettings() }
         .preferredColorScheme(wb.theme.isDark ? .dark : .light)
+    }
+
+    /// System follows the iPad; Light and Dark pin it (as the sun/moon button does).
+    private var canvasBinding: Binding<Int> {
+        Binding(get: { followsSystem ? 0 : homeDark ? 2 : 1 }, set: { v in
+            let dark = v == 0 ? Appearance.systemDark : v == 2
+            followsSystem = v == 0
+            if dark != homeDark { Appearance.flip(in: wb.scene) { homeDark = dark } }
+        })
     }
 
     private var themeBinding: Binding<String> {

@@ -82,7 +82,7 @@ final class Languages: ObservableObject {
                 return nil
             } catch {
                 let name = lspLanguageName(languageId: languageId) ?? languageId
-                self.missing[languageId] = Missing(name: name, message: error.localizedDescription, install: "")
+                self.missing[languageId] = Missing(name: name, message: error.userMessage, install: "")
                 return nil
             }
         }
@@ -483,7 +483,7 @@ final class Languages: ObservableObject {
                 }
                 await wb?.open(target.path, line: Int(target.range.start.line) + 1, column: Int(target.range.start.character))
             } catch {
-                wb?.alert = error.localizedDescription
+                wb?.alert = error.userMessage
             }
         }
     }
@@ -559,7 +559,7 @@ struct CompletionPopup: View {
                 let t = wb.theme
                 let origin = geo.frame(in: .global).origin
                 let rows = min(c.visible.count, 12)
-                let height = CGFloat(rows) * 24
+                let height = CGFloat(rows) * 24 + 8 // rows, plus room for the selection pill's inset
                 let below = c.anchor.maxY - origin.y + 2
                 let y = below + height > geo.size.height ? c.anchor.minY - origin.y - height - 2 : below
                 let x = min(max(c.anchor.minX - origin.x - 24, 4), max(geo.size.width - 444, 4))
@@ -572,15 +572,13 @@ struct CompletionPopup: View {
                                     .onTapGesture { languages.accept(item) }
                             }
                         }
+                        .padding(.vertical, 4)
                     }
                     .onChange(of: c.selected) { proxy.scrollTo(c.selected) }
                 }
                 .frame(width: 440, height: height)
                 // Solid, not glass: it redraws on every keystroke.
-                .background(t.ui("editorSuggestWidget.background", "editorWidget.background", default: "#252526"))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(t.widgetBorder))
-                .shadow(color: .black.opacity(t.isDark ? 0.35 : 0.12), radius: 14, y: 6)
+                .floating(t, t.ui("editorSuggestWidget.background", "editorWidget.background", default: "#252526"), solid: true)
                 .offset(x: x, y: y)
             }
         }
@@ -598,12 +596,20 @@ struct CompletionPopup: View {
                 Text(d).font(.system(size: 12)).foregroundStyle(t.descriptionFg).lineLimit(1).truncationMode(.middle)
             }
         }
-        .padding(.horizontal, 6)
+        .padding(.horizontal, 10)
         .frame(height: 24)
         .foregroundStyle(selected ? t.ui("editorSuggestWidget.selectedForeground", "list.activeSelectionForeground", default: "#ffffff")
                          : t.ui("editorSuggestWidget.foreground", "editor.foreground", default: "#d4d4d4"))
-        .background(selected ? t.ui("editorSuggestWidget.selectedBackground", "list.activeSelectionBackground", default: "#04395e") : .clear)
-        .hoverBackground(selected ? .clear : t.ui("editorSuggestWidget.hoverBackground", "list.hoverBackground", default: "#2a2d2e"))
+        .background {
+            // A rounded pill, inset from the edges, like the pickers' selection.
+            if selected {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(t.ui("editorSuggestWidget.selectedBackground", "list.activeSelectionBackground", default: "#04395e"))
+                    .padding(.horizontal, 4)
+            }
+        }
+        .hoverBackground(selected ? .clear : t.ui("editorSuggestWidget.hoverBackground", "list.hoverBackground", default: "#2a2d2e"),
+                         cornerRadius: 6, inset: 4)
         .contentShape(Rectangle())
     }
 
@@ -667,9 +673,7 @@ struct HoverPopup: View {
                 .frame(maxHeight: 280)
                 .fixedSize(horizontal: false, vertical: true)
                 .foregroundStyle(t.ui("editorHoverWidget.foreground", "editor.foreground", default: "#cccccc"))
-                .glass(t.ui("editorHoverWidget.background", "editorWidget.background", default: "#252526"), radius: 12)
-                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(t.widgetBorder))
-                .shadow(color: .black.opacity(t.isDark ? 0.35 : 0.12), radius: 14, y: 6)
+                .floating(t, t.ui("editorHoverWidget.background", "editorWidget.background", default: "#252526"))
                 .onTapGesture { languages.hover = nil }
                 // Above the line, it sits right on it whatever its height (was 290 pt up).
                 .padding(.leading, x)
@@ -729,50 +733,86 @@ struct HoverPopup: View {
 struct ProblemsView: View {
     @EnvironmentObject var languages: Languages
     @EnvironmentObject var wb: Workbench
+    @Environment(\.home) private var h
+    /// Files whose problems are folded away.
+    @State private var collapsed: Set<String> = []
 
     var body: some View {
         let t = wb.theme
         let files = languages.diagnostics.keys.sorted()
-        if files.isEmpty {
-            Text("No problems have been detected in the workspace.")
-                .font(.system(size: 13)).foregroundStyle(t.descriptionFg)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .padding(12)
-        } else {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(files, id: \.self) { path in
-                        let items = (languages.diagnostics[path] ?? []).sorted { ($0.severity, $0.range.start.line) < ($1.severity, $1.range.start.line) }
-                        HStack(spacing: 6) {
-                            FileIcon(name: wb.baseName(path), size: 14)
-                            Text(wb.baseName(path)).font(.system(size: 13))
-                            Text(wb.relative(wb.parentDir(path))).font(.system(size: 12)).foregroundStyle(t.descriptionFg).lineLimit(1)
-                            Text("\(items.count)").font(.system(size: 11)).padding(.horizontal, 5)
-                                .background(t.activityBadgeBg).clipShape(Capsule())
-                        }
-                        .padding(.horizontal, 12).frame(height: 22)
-                        ForEach(Array(items.enumerated()), id: \.offset) { _, d in
-                            HStack(spacing: 6) {
-                                severityIcon(d.severity, t)
-                                Text(d.message).font(.system(size: 13)).lineLimit(2)
-                                if let src = d.source {
-                                    Text(d.code.map { "\(src)(\($0))" } ?? src).font(.system(size: 12)).foregroundStyle(t.descriptionFg)
-                                }
-                                Text("[Ln \(d.range.start.line + 1), Col \(d.range.start.character + 1)]")
-                                    .font(.system(size: 12)).foregroundStyle(t.descriptionFg)
-                                Spacer()
-                            }
-                            .padding(.leading, 34).padding(.vertical, 3)
-                            .hoverBackground(t.listHoverBg)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                Task { await wb.open(path, line: Int(d.range.start.line) + 1, column: Int(d.range.start.character)) }
+        ZStack(alignment: .topLeading) {
+            if files.isEmpty {
+                // All clear: a seal that pops in, rather than a bare sentence.
+                VStack(spacing: 10) {
+                    Image(systemName: "checkmark.seal").font(.system(size: 30, weight: .light))
+                        .foregroundStyle(h.green)
+                        .symbolBounceIn()
+                    Text("No problems have been detected in the workspace.")
+                        .font(.system(size: 13)).foregroundStyle(t.descriptionFg)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.blurFade)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(files, id: \.self) { path in
+                            // A server can report the same problem twice; rows are keyed by the problem.
+                            var seen = Set<Diag>()
+                            let items = (languages.diagnostics[path] ?? []).filter { seen.insert($0).inserted }
+                                .sorted { ($0.severity, $0.range.start.line) < ($1.severity, $1.range.start.line) }
+                            fileRow(path, count: items.count, t)
+                            if !collapsed.contains(path) {
+                                // Keyed by the problem itself: fixed ones fade out, new ones fade in.
+                                ForEach(items, id: \.self) { d in problemRow(d, path, t).transition(.blurFade) }
                             }
                         }
                     }
+                    .padding(.vertical, 4)
                 }
+                .foregroundStyle(t.panelTitleActiveFg)
+                .transition(.opacity)
             }
-            .foregroundStyle(t.panelTitleActiveFg)
+        }
+        .animation(Motion.layout, value: languages.diagnostics)
+        .animation(Motion.layout, value: collapsed)
+    }
+
+    private func fileRow(_ path: String, count: Int, _ t: VSTheme) -> some View {
+        HStack(spacing: 6) {
+            CodiconView(icon: .chevronRight, size: 14)
+                .rotationEffect(.degrees(collapsed.contains(path) ? 0 : 90))
+            FileIcon(name: wb.baseName(path), size: 14)
+            Text(wb.baseName(path)).font(.system(size: 13, weight: .medium))
+            Text(wb.relative(wb.parentDir(path))).font(.system(size: 12)).foregroundStyle(t.descriptionFg).lineLimit(1)
+            Text("\(count)").font(.system(size: 11, weight: .semibold)).padding(.horizontal, 6).frame(minHeight: 16)
+                .background(t.activityBadgeBg).foregroundStyle(t.ui("activityBarBadge.foreground", default: "#ffffff")).clipShape(Capsule())
+                .contentTransition(.numericText())
+            Spacer()
+        }
+        .padding(.horizontal, 10).frame(height: 26)
+        .hoverBackground(t.hoverFill, cornerRadius: 6, inset: 4)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if collapsed.contains(path) { collapsed.remove(path) } else { collapsed.insert(path) }
+        }
+    }
+
+    private func problemRow(_ d: Diag, _ path: String, _ t: VSTheme) -> some View {
+        HStack(spacing: 6) {
+            severityIcon(d.severity, t)
+            Text(d.message).font(.system(size: 13)).lineLimit(2)
+            if let src = d.source {
+                Text(d.code.map { "\(src)(\($0))" } ?? src).font(.system(size: 12)).foregroundStyle(t.descriptionFg)
+            }
+            Text("[Ln \(d.range.start.line + 1), Col \(d.range.start.character + 1)]")
+                .font(.system(size: 12)).foregroundStyle(t.descriptionFg)
+            Spacer()
+        }
+        .padding(.leading, 34).padding(.vertical, 4)
+        .hoverBackground(t.hoverFill, cornerRadius: 6, inset: 4)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            Task { await wb.open(path, line: Int(d.range.start.line) + 1, column: Int(d.range.start.character)) }
         }
     }
 }
